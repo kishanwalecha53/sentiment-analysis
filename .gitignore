@@ -1,0 +1,5 @@
+.env
+scripts/arabic_review.json
+.vercel
+local_server copy.py
+__pycache__/

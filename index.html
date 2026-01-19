@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Sentiment Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+  <div class="wrap">
+    <!-- Header -->
+    <!-- <div class="header">
+      <div class="header-info">
+        <h1>Prince Sultan Military Medical City</h1>
+        <div class="subtitle">Google Map Review Dashboard - Feedback Overview</div>
+      </div>
+    </div> -->
+    <div class="header">
+      <div class="header-info">
+        <div class="header-info-left">
+          <img class="logo" src="logo1.svg" alt="ICON" onerror="this.style.display='none'" style="width: 170px" />
+          <h1 class="title">Customer Sentiments Dashboard</h1>
+        </div>
+        <div class="header-info-right">
+          <img class="logo" src="logo.png" alt="LOGO" onerror="this.style.display='none'" />
+          <h1 class="title1">Prince Sultan Military Medical City</h1>
+        </div>
+      </div>
+      <h1 class="title2">Customer Sentiments Dashboard</h1>
+    </div>
+    <div style="margin-bottom: 10px;"></div>
+
+
+
+
+    <!-- Top Stats Section -->
+    <div class="top-section">
+      <div class="total-reviews">
+        <div class="aligning">
+          <div class="label">Total Reviews: </div>
+          <div class="number" id="totalReviews">—</div>
+        </div>
+        <div class="pie-chart-container">
+          <canvas id="pieChart"></canvas>
+        </div>
+      </div>
+
+      <div class="overall-summary">
+        <h3>Overall Summary</h3>
+        <ul class="summary-list" id="overallSummary"></ul>
+      </div>
+
+      <div class="top-themes">
+        <div class="note">
+          <strong>Note: For reviews without text, we followed these parameters: </strong> <br>
+          <span style="color:var(--orange);">Negative: Rating less than 3</span> <br>
+          <span style="color:var(--gray);">Neutral: Rating equal to 3</span> <br>
+          <span style="color:var(--green);">Positive: Rating more than 3</span>
+        </div>
+        <h3>Top themes:</h3>
+        <div id="topThemes"></div>
+      </div>
+
+
+    </div>
+     <!-- Date Filter Section -->
+<div class="filter-section">
+  <div class="filter-header">
+    <h3>Filter Reviews by Date</h3>
+    <span id="filterStatus" class="filter-status"></span>
+  </div>
+  
+  <div class="filter-controls">
+    <div class="filter-group">
+      <label for="startDate">Start Date:</label>
+      <input type="date" id="startDate" class="filter-input" />
+    </div>
+    
+    <div class="filter-group">
+      <label for="endDate">End Date:</label>
+      <input type="date" id="endDate" class="filter-input" />
+    </div>
+    
+    <div class="filter-group">
+      <label for="monthFilter">Quick Filter:</label>
+      <select id="monthFilter" class="filter-select">
+        <option value="">-- Select Period --</option>
+        <option value="last30">Last 30 Days</option>
+        <option value="last6months">Last 6 Months</option>
+        <option value="lastyear">Last Year</option>
+        <option value="2024">Year 2024</option>
+        <option value="2023">Year 2023</option>
+        <option value="2022">Year 2022</option>
+        <option value="2021">Year 2021</option>
+        <option value="2020">Year 2020</option>
+        <option value="2015-2019">2015-2019</option>
+        <option value="2010-2014">2010-2014</option>
+      </select>
+    </div>
+    
+    <div class="filter-buttons">
+      <button id="applyFilter" class="btn-primary">Apply Filter</button>
+      <button id="clearFilter" class="btn-secondary">Clear Filter</button>
+    </div>
+  </div>
+  
+  <div id="filterLoading" class="filter-loading" style="display: none;">
+    <div class="spinner"></div>
+    <span>Generating summaries for filtered reviews...</span>
+  </div>
+</div>
+
+    <!-- Main Content Grid -->
+    <div class="main-grid">
+      <div class="chart-section">
+        <canvas id="barChart" height="300"></canvas>
+      </div>
+
+      <div class="sentiment-cards">
+        <div class="sentiment-card positive active" id="pill-positive" data-sentiment="positive">
+          <div class="side">
+            <h3>Positive Review</h3> <svg xmlns="http://www.w3.org/2000/svg" width="24px" height="24px"
+              viewBox="0 0 24 24" fill="none">
+              <path
+                d="M12 23.25C18.2132 23.25 23.25 18.2132 23.25 12C23.25 5.7868 18.2132 0.75 12 0.75C5.7868 0.75 0.75 5.7868 0.75 12C0.75 18.2132 5.7868 23.25 12 23.25Z"
+                stroke="#71717A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+              <path
+                d="M18.75 10.5005C18.595 10.0617 18.3077 9.68178 17.9278 9.41305C17.5478 9.14432 17.0939 9.00001 16.6285 9.00001C16.1631 9.00001 15.7092 9.14432 15.3292 9.41305C14.9551 9.67765 14.6709 10.0501 14.5142 10.4803"
+                stroke="#71717A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+              <path
+                d="M5.25018 10.5005C5.4052 10.0617 5.69247 9.68178 6.07242 9.41305C6.45237 9.14432 6.9063 9.00001 7.37168 9.00001C7.83706 9.00001 8.29099 9.14432 8.67094 9.41305C9.03808 9.67272 9.31868 10.0362 9.47705 10.4563"
+                stroke="#71717A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+              <path
+                d="M5.94824 15C6.50681 16.1273 7.3692 17.076 8.43818 17.7394C9.50715 18.4027 10.7402 18.7542 11.9982 18.7542C13.2563 18.7542 14.4893 18.4027 15.5583 17.7394C16.6202 17.0804 17.4782 16.1399 18.0371 15.0224"
+                stroke="#71717A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </div>
+          <div class="count-side">
+            <div class="count" id="count-positive">—</div>
+            <div class="percentage" id="pct-positive">—</div>
+          </div>
+        </div>
+
+        <div class="sentiment-card negative" id="pill-negative" data-sentiment="negative">
+          <div class="side">
+            <h3>Negative Review</h3> <svg xmlns="http://www.w3.org/2000/svg" width="24px" height="24px"
+              viewBox="0 0 24 24" fill="none">
+              <path fill-rule="evenodd" clip-rule="evenodd"
+                d="M12 2.75C6.89137 2.75 2.75 6.89137 2.75 12C2.75 17.1086 6.89137 21.25 12 21.25C17.1086 21.25 21.25 17.1086 21.25 12C21.25 6.89137 17.1086 2.75 12 2.75ZM1.25 12C1.25 6.06294 6.06294 1.25 12 1.25C17.9371 1.25 22.75 6.06294 22.75 12C22.75 17.9371 17.9371 22.75 12 22.75C6.06294 22.75 1.25 17.9371 1.25 12ZM8.55339 16.3975C9.5258 15.6767 10.715 15.25 12 15.25C13.285 15.25 14.4742 15.6767 15.4466 16.3975C15.7794 16.6441 15.8492 17.1138 15.6025 17.4466C15.3559 17.7794 14.8862 17.8492 14.5534 17.6025C13.825 17.0627 12.9459 16.75 12 16.75C11.0541 16.75 10.175 17.0627 9.44661 17.6025C9.11385 17.8492 8.64413 17.7794 8.39747 17.4466C8.15082 17.1138 8.22062 16.6441 8.55339 16.3975Z"
+                fill="#1C274C" />
+              <path
+                d="M16 10.5C16 11.3284 15.5523 12 15 12C14.4477 12 14 11.3284 14 10.5C14 9.67157 14.4477 9 15 9C15.5523 9 16 9.67157 16 10.5Z"
+                fill="#1C274C" />
+              <path
+                d="M10 10.5C10 11.3284 9.55229 12 9 12C8.44772 12 8 11.3284 8 10.5C8 9.67157 8.44772 9 9 9C9.55229 9 10 9.67157 10 10.5Z"
+                fill="#1C274C" />
+            </svg>
+          </div>
+          <div class="count-side">
+            <div class="count" id="count-negative">—</div>
+            <div class="percentage" id="pct-negative">—</div>
+          </div>
+        </div>
+
+        <div class="sentiment-card neutral" id="pill-neutral" data-sentiment="neutral">
+          <div class="side">
+            <h3>Neutral Review</h3> <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+              fill="#000000" width="24px" height="24px" viewBox="0 0 36 36" version="1.1"
+              preserveAspectRatio="xMidYMid meet">
+              <title>neutral-face-line</title>
+              <path d="M24.05,22.06h-12a1,1,0,0,0,0,2h12a1,1,0,0,0,0-2Z" class="clr-i-outline clr-i-outline-path-1" />
+              <path d="M18,2A16,16,0,1,0,34,18,16,16,0,0,0,18,2Zm0,30A14,14,0,1,1,32,18,14,14,0,0,1,18,32Z"
+                class="clr-i-outline clr-i-outline-path-2" />
+              <circle cx="25.16" cy="14.28" r="1.8" class="clr-i-outline clr-i-outline-path-3" />
+              <circle cx="11.16" cy="14.28" r="1.8" class="clr-i-outline clr-i-outline-path-4" />
+              <rect x="0" y="0" width="36" height="36" fill-opacity="0" />
+            </svg>
+          </div>
+          <div class="count-side">
+            <div class="count" id="count-neutral">—</div>
+            <div class="percentage" id="pct-neutral">—</div>
+          </div>
+        </div>
+
+        <div class="sentiment-card doubtful" id="pill-doubtful" data-sentiment="doubtful">
+          <div class="side">
+            <h3>Doubtful Review</h3> <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+              width="24px" height="24px" viewBox="0 0 64 64" aria-hidden="true" role="img"
+              class="iconify iconify--emojione-monotone" preserveAspectRatio="xMidYMid meet">
+              <path
+                d="M61.539 26.797C58.974 12.239 46.316 2 32.031 2c-1.73 0-3.482.15-5.246.461C10.471 5.338-.425 20.895 2.452 37.215C5.018 51.772 17.677 62.01 31.961 62.01c1.729 0 3.482-.15 5.244-.461c16.316-2.877 27.213-18.432 24.334-34.752M54.523 47.78c-4.213 6.016-10.518 10.031-17.752 11.307c-1.592.28-3.21.423-4.811.423c-13.351 0-24.726-9.559-27.047-22.729C2.281 21.848 12.288 7.556 27.22 4.923c1.591-.28 3.21-.423 4.812-.423c13.35 0 24.725 9.56 27.047 22.731c1.275 7.235-.343 14.533-4.556 20.549"
+                fill="#000000" />
+              <circle cx="42.383" cy="24.683" r="5" fill="#000000" />
+              <circle cx="19.732" cy="28.676" r="4.999" fill="#000000" />
+              <path
+                d="M43.27 41.832c-5.766-1.549-12.049-.428-16.93 3.013c-1.205.87 1.053 4.028 2.252 3.153c3.223-2.268 8.352-3.835 13.66-2.432c1.422.376 2.535-3.309 1.018-3.734"
+                fill="#000000" />
+            </svg>
+          </div>
+          <div class="count-side">
+            <div class="count" id="count-doubtful">—</div>
+            <div class="percentage" id="pct-doubtful">—</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- Bottom Section -->
+    <div class="bottom-section">
+      <div class="section-header">
+        <div>
+          <span style="color:var(--muted);font-size:13px">Dimension: </span>
+          <span style="font-weight:700" id="selectedDimension">Service Quality</span>
+          <span style="margin-left:32px;color:var(--muted);font-size:13px">Sentiment: </span>
+          <span style="font-weight:700" id="selectedSentiment">Positive</span>
+        </div>
+      </div>
+
+      <div class="dimension-buttons" id="dimensionButtons"></div>
+
+      <div class="content-grid">
+        <div class="insights-section">
+          <h4>Summary</h4>
+          <div class="insights-content" id="dimensionSummary">—</div>
+          <ul class="insights-list" id="keyInsights"></ul>
+
+          <!-- <h4>Key Insights</h4> -->
+
+          <h4>Recommended Actions</h4>
+          <ul class="insights-list" id="recs"></ul>
+        </div>
+
+        <div class="reviews-container">
+          <h4>Reviews</h4>
+          <div id="reviewsList">Loading reviews…</div>
+        </div>
+      </div>
+
+
+    </div>
+
+
+    <elevenlabs-convai agent-id="agent_2501k59bk5yxf1nr297cq319q2t4"></elevenlabs-convai>
+    <script src="https://unpkg.com/@elevenlabs/convai-widget-embed" async type="text/javascript"></script>
+    <script src="script.js"></script>
+</body>
+
+</html>
