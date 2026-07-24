@@ -23,7 +23,11 @@ def chunk_list(lst, chunk_size):
 class ReviewSentimentAnalyzer:
     def __init__(self, openai_api_key: str):
         """Initialize the analyzer with OpenAI API key"""
-        self.client = openai.OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=0)
+        self.client = openai.OpenAI(
+            api_key=openai_api_key,
+            timeout=float(os.getenv("OPENAI_TIMEOUT_SECONDS", "30.0")),
+            max_retries=0,
+        )
         
         # Define sentiment analysis dimensions
         self.analysis_dimensions = [
@@ -644,18 +648,9 @@ Generate a summary in the following JSON format:
 
 def load_reviews_from_file(file_path: str) -> List[Dict[str, Any]]:
     """Load reviews from JSON file - handles the new input format"""
-    max_bytes = int(os.getenv("MAX_REVIEW_FILE_BYTES", str(25 * 1024 * 1024)))
-    if os.path.getsize(file_path) > max_bytes:
-        raise ValueError(f"ERR_REVIEW_FILE_TOO_LARGE: {file_path} exceeds {max_bytes} bytes")
-
     try:
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        except UnicodeDecodeError as e:
-            logger.warning("review_file_encoding_fallback", extra={"file_path": file_path, "error": str(e)})
-            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-                data = json.load(f)
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
         
         # Handle the new JSON structure
         if isinstance(data, dict) and 'reviews' in data:
