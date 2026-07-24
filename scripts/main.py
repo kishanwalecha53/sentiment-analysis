@@ -642,35 +642,11 @@ Generate a summary in the following JSON format:
             "high_severity_count": len([s for s in severity_scores if s >= 4])
         }
 
-from pathlib import Path
-from typing import Any, Dict, List
-
-
-def _extract_reviews_payload(data: Any, file_path: str) -> List[Dict[str, Any]]:
-    if isinstance(data, dict) and isinstance(data.get("reviews"), list):
-        return data["reviews"]
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        for key in ("data", "items"):
-            if isinstance(data.get(key), list):
-                return data[key]
-        return [data]
-    raise ValueError(f"ERR_INVALID_REVIEW_JSON_STRUCTURE: {file_path}")
-
-
-def load_reviews_from_file(file_path: str, max_bytes: int = 25 * 1024 * 1024) -> List[Dict[str, Any]]:
-    path = Path(file_path)
-    if path.stat().st_size > max_bytes:
-        raise ValueError(f"ERR_INPUT_TOO_LARGE: {file_path} exceeds {max_bytes} bytes")
+def load_reviews_from_file(file_path: str) -> List[Dict[str, Any]]:
+    """Load reviews from JSON file - handles the new input format"""
     try:
-        with path.open("r", encoding="utf-8") as f:
+        with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-    except UnicodeDecodeError as e:
-        logger.error("review_file_unicode_decode_error", extra={"file": file_path, "position": e.start})
-        with path.open("r", encoding="utf-8", errors="replace") as f:
-            data = json.load(f)
-    return _extract_reviews_payload(data, file_path)
         
         # Handle the new JSON structure
         if isinstance(data, dict) and 'reviews' in data:
