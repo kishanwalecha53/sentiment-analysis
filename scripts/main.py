@@ -23,18 +23,12 @@ def chunk_list(lst, chunk_size):
 class ReviewSentimentAnalyzer:
     def __init__(self, openai_api_key: str):
         """Initialize the analyzer with OpenAI API key"""
-        self.client = openai.OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=0)
+        self.client = openai.OpenAI(
+            api_key=openai_api_key,
+            timeout=float(os.getenv("OPENAI_TIMEOUT_SECONDS", "30.0")),
+            max_retries=0,
+        )
         
-        # Define sentiment analysis dimensions
-        self.analysis_dimensions = [
-            "Service Quality",
-            "Facility Experience", 
-            "Clinical Care",
-            "Operations",
-            "Trust & Safety"
-        ]
-        
-        # Define sentiment analysis dimensions
         self.analysis_dimensions = [
             "Service Quality",
             "Facility Experience", 
@@ -226,19 +220,20 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                     time.sleep(wait_time)
                 
                 response = self.client.chat.completions.create(
-                    model="gpt-4",
+                    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
                     messages=[
                         {
                             "role": "system", 
-                            "content": "You are an expert sentiment analyst fluent in both Arabic and English. Respond with ONLY valid JSON. No explanatory text before or after the JSON."
+                            "content": "You are an expert sentiment analyst fluent in both Arabic and English. Respond with ONLY valid JSON matching the required schema."
                         },
                         {
                             "role": "user", 
                             "content": prompt
                         }
                     ],
-                    temperature=0.3,
-                    max_tokens=1000
+                    temperature=0.1,
+                    max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", "1000")),
+                    response_format={"type": "json_object"}
                 )
                 
                 # Get raw response
@@ -289,6 +284,25 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                 else:
                     return self._create_fallback_analysis(review, error_msg)
     
+    def _coerce_float(self, value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            logger.warning("llm_numeric_field_invalid", extra={"value": str(value)[:32]})
+            return default
+
+    def _coerce_analysis_result(self, analysis_result: Dict[str, Any]) -> Dict[str, Any]:
+        analysis_result["confidence"] = max(0.0, min(1.0, self._coerce_float(analysis_result.get("confidence"), 0.0)))
+        analysis_result["sentiment_score"] = max(-1.0, min(1.0, self._coerce_float(analysis_result.get("sentiment_score"), 0.0)))
+        analysis_result["severity"] = int(max(0, min(5, self._coerce_float(analysis_result.get("severity"), 0.0))))
+        if analysis_result.get("sentiment") not in {"positive", "negative", "neutral", "doubtful"}:
+            analysis_result["sentiment"] = "neutral"
+        if not isinstance(analysis_result.get("dimensions"), list):
+            analysis_result["dimensions"] = []
+        if not isinstance(analysis_result.get("key_themes"), list):
+            analysis_result["key_themes"] = []
+        return analysis_result
+
     def _create_fallback_analysis(self, review: Dict[str, Any], error_msg: str) -> Dict[str, Any]:
         """Create a fallback analysis when API call fails"""
         rating = review.get('rating', 0)
@@ -435,11 +449,20 @@ Generate a summary in the following JSON format:
                     max_tokens=800
                 )
                 
-                raw_response = response.choices[0].message.content
-                cleaned_response = self._clean_openai_response(raw_response)
-                summary_result = json.loads(cleaned_response)
-                
-                summaries[sentiment_type] = summary_result
+                try:
+                    raw_response = response.choices[0].message.content
+                    if not raw_response:
+                        raise ValueError("Empty response from OpenAI")
+                    cleaned_response = self._clean_openai_response(raw_response)
+                    summary_result = json.loads(cleaned_response)
+                    summaries[sentiment_type] = summary_result
+                except json.JSONDecodeError as e:
+                    logger.warning("sentiment_summary_json_invalid", extra={"sentiment_type": sentiment_type, "error": str(e)})
+                    summaries[sentiment_type] = {
+                        "summary": f"Summary generation returned invalid JSON for {sentiment_type} reviews.",
+                        "key_insights": [f"Analysis failed for {len(filtered_reviews)} {sentiment_type} reviews"],
+                        "recommendations": ["Manual review recommended due to analysis failure"]
+                    }
                 
             except Exception as e:
                 print(f"Error generating {sentiment_type} summary: {e}")
@@ -691,9 +714,18 @@ Generate a summary in the following JSON format:
 
 def load_reviews_from_file(file_path: str) -> List[Dict[str, Any]]:
     """Load reviews from JSON file - handles the new input format"""
+    max_bytes = int(os.getenv("MAX_REVIEW_FILE_BYTES", str(25 * 1024 * 1024)))
+    if os.path.getsize(file_path) > max_bytes:
+        raise ValueError(f"ERR_REVIEW_FILE_TOO_LARGE: {file_path} exceeds {max_bytes} bytes")
+
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except UnicodeDecodeError as e:
+            logger.warning("review_file_encoding_fallback", extra={"file_path": file_path, "error": str(e)})
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                data = json.load(f)
         
         # Handle the new JSON structure
         if isinstance(data, dict) and 'reviews' in data:
@@ -730,7 +762,7 @@ def main():
     parser.add_argument('input_file', help='Path to input JSON file containing reviews')
     parser.add_argument('-o', '--output', help='Output file path (default: analysis_results.json)', 
                        default='analysis_results.json')
-    parser.add_argument('-k', '--api-key', help='OpenAI API key (or set OPENAI_API_KEY env var)')
+    parser.add_argument('-k', '--api-key', help='OpenAI API key (prefer OPENAI_API_KEY env var; command-line values may be visible in process listings)')
     parser.add_argument('-d', '--delay', type=float, default=1.0, 
                        help='Delay between API calls in seconds (default: 1.0)')
     

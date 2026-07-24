@@ -2,6 +2,8 @@ from serpapi import GoogleSearch
 from urllib.parse import urlsplit, parse_qsl
 import json
 import traceback
+import time
+import random
 from datetime import datetime, timezone
 import os
 import logging
@@ -58,7 +60,16 @@ def extract_reviews(max_pages=500):
             page_num += 1
             
             try:
-                results = search.get_dict()
+                for fetch_attempt in range(3):
+                    try:
+                        results = search.get_dict()
+                        break
+                    except Exception as e:
+                        if fetch_attempt == 2:
+                            raise
+                        wait_time = min(30.0, (2 ** fetch_attempt) + random.uniform(0.0, 1.0))
+                        logger.warning("serp_fetch_retry", extra={"page": page_num, "attempt": fetch_attempt + 1, "wait_time_seconds": round(wait_time, 3), "error": str(e)})
+                        time.sleep(wait_time)
                 # logger.info(
                 #     "[tomo-id-077] Extracting reviews from SerpAPI page",
                 #     extra={"operation": "extract_reviews", "page_num": page_num, "max_pages": max_pages}
@@ -71,7 +82,8 @@ def extract_reviews(max_pages=500):
                     for result in page_reviews:
                         try:
                             # Safely extract all fields with proper error handling
-                            review_data = {
+                                snippet_text = safe_get_nested(result, "extracted_snippet", "original", default=None) or result.get("snippet", "")
+                                review_data = {
                                 "page": page_num,
                                 "name": safe_get_nested(result, "user", "name", default=""),
                                 "link": safe_get_nested(result, "user", "link", default=""),
@@ -81,7 +93,7 @@ def extract_reviews(max_pages=500):
                                 "snippet": result.get("snippet", ""),
                                 "images": result.get("images", []),
                                 "local_guide": safe_get_nested(result, "user", "local_guide", default=False),
-                                "text": safe_get_nested(result, "extracted_snippet", "original", default=""),
+                                "text": snippet_text,
                             }
                             reviews.append(review_data)
                             
@@ -113,8 +125,9 @@ def extract_reviews(max_pages=500):
                 
                 else:
                     error_msg = f"API Error on page {page_num}: {results['error']}"
-                    print(error_msg)
-                    errors.append({
+                    else:
+                        logger.warning("serp_api_error", extra={"page": page_num, "error": results.get("error")})
+                        errors.append({
                         "page": page_num,
                         "error": error_msg,
                         "api_error": results["error"]
@@ -133,6 +146,8 @@ def extract_reviews(max_pages=500):
                         break
                         
                 except Exception as e:
+                    if "pagination" in str(e).lower() or "token" in str(e).lower():
+                        logger.warning("serp_pagination_token_failure", extra={"page": page_num, "error": str(e)})
                     error_msg = f"Error processing pagination on page {page_num}: {e}"
                     print(error_msg)
                     errors.append({
@@ -174,7 +189,7 @@ def extract_reviews(max_pages=500):
         "metadata": {
             "total_reviews": len(reviews),
             "total_pages_processed": page_num,
-            "extraction_date": datetime.now().isoformat(),
+            "extraction_date": datetime.now(timezone.utc).isoformat(),
             "has_errors": len(errors) > 0,
             "error_count": len(errors)
         },
@@ -186,12 +201,7 @@ def extract_reviews(max_pages=500):
     saved_file = save_data_to_json(final_data)
     
     # Print summary
-    print(f"\n=== EXTRACTION SUMMARY ===")
-    print(f"Total reviews extracted: {len(reviews)}")
-    print(f"Total pages processed: {page_num}")
-    print(f"Errors encountered: {len(errors)}")
-    if saved_file:
-        print(f"Data saved to: {saved_file}")
+    logger.info("extraction_summary", extra={"total_reviews": len(reviews), "total_pages_processed": page_num, "error_count": len(errors), "saved_file": saved_file})
     
     # Also print the JSON to console (optional, you can remove this if files get too large)
     print(f"\n=== JSON OUTPUT ===")
