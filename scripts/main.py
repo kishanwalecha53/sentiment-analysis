@@ -169,20 +169,19 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                     time.sleep(wait_time)
                 
                 response = self.client.chat.completions.create(
-                    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                    model="gpt-4",
                     messages=[
                         {
                             "role": "system", 
-                            "content": "You are an expert sentiment analyst fluent in both Arabic and English. Respond with ONLY valid JSON matching the required schema."
+                            "content": "You are an expert sentiment analyst fluent in both Arabic and English. Respond with ONLY valid JSON. No explanatory text before or after the JSON."
                         },
                         {
                             "role": "user", 
                             "content": prompt
                         }
                     ],
-                    temperature=0.1,
-                    max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", "1000")),
-                    response_format={"type": "json_object"}
+                    temperature=0.3,
+                    max_tokens=1000
                 )
                 
                 # Get raw response
@@ -243,6 +242,25 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                     )
                     return self._create_fallback_analysis(review, error_msg)
     
+    def _coerce_float(self, value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            logger.warning("llm_numeric_field_invalid", extra={"value": str(value)[:32]})
+            return default
+
+    def _coerce_analysis_result(self, analysis_result: Dict[str, Any]) -> Dict[str, Any]:
+        analysis_result["confidence"] = max(0.0, min(1.0, self._coerce_float(analysis_result.get("confidence"), 0.0)))
+        analysis_result["sentiment_score"] = max(-1.0, min(1.0, self._coerce_float(analysis_result.get("sentiment_score"), 0.0)))
+        analysis_result["severity"] = int(max(0, min(5, self._coerce_float(analysis_result.get("severity"), 0.0))))
+        if analysis_result.get("sentiment") not in {"positive", "negative", "neutral", "doubtful"}:
+            analysis_result["sentiment"] = "neutral"
+        if not isinstance(analysis_result.get("dimensions"), list):
+            analysis_result["dimensions"] = []
+        if not isinstance(analysis_result.get("key_themes"), list):
+            analysis_result["key_themes"] = []
+        return analysis_result
+
     def _create_fallback_analysis(self, review: Dict[str, Any], error_msg: str) -> Dict[str, Any]:
         """Create a fallback analysis when API call fails"""
         rating = review.get('rating', 0)
