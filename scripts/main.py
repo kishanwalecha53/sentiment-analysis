@@ -25,16 +25,6 @@ class ReviewSentimentAnalyzer:
         """Initialize the analyzer with OpenAI API key"""
         self.client = openai.OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=0)
         
-        # Define sentiment analysis dimensions
-        self.analysis_dimensions = [
-            "Service Quality",
-            "Facility Experience", 
-            "Clinical Care",
-            "Operations",
-            "Trust & Safety"
-        ]
-        
-        # Define sentiment analysis dimensions
         self.analysis_dimensions = [
             "Service Quality",
             "Facility Experience", 
@@ -388,20 +378,11 @@ Generate a summary in the following JSON format:
                     max_tokens=800
                 )
                 
-                try:
-                    raw_response = response.choices[0].message.content
-                    if not raw_response:
-                        raise ValueError("Empty response from OpenAI")
-                    cleaned_response = self._clean_openai_response(raw_response)
-                    summary_result = json.loads(cleaned_response)
-                    summaries[sentiment_type] = summary_result
-                except json.JSONDecodeError as e:
-                    logger.warning("sentiment_summary_json_invalid", extra={"sentiment_type": sentiment_type, "error": str(e)})
-                    summaries[sentiment_type] = {
-                        "summary": f"Summary generation returned invalid JSON for {sentiment_type} reviews.",
-                        "key_insights": [f"Analysis failed for {len(filtered_reviews)} {sentiment_type} reviews"],
-                        "recommendations": ["Manual review recommended due to analysis failure"]
-                    }
+                raw_response = response.choices[0].message.content
+                cleaned_response = self._clean_openai_response(raw_response)
+                summary_result = json.loads(cleaned_response)
+                
+                summaries[sentiment_type] = summary_result
                 
             except Exception as e:
                 print(f"Error generating {sentiment_type} summary: {e}")
