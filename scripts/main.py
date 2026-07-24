@@ -219,9 +219,14 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
             except json.JSONDecodeError as e:
                 error_msg = f"ERR_OPENAI_JSON_PARSE: JSON parsing error on attempt {attempt + 1}: {e}"
                 if attempt < retry_count:
-                    print(
-                        f"[tomo-id-072] OpenAI response JSON parsing failed; retrying (attempt {attempt + 1})"
-                    )
+                logger.warning(
+                    "openai_response_json_parse_failed",
+                    extra={
+                        "attempt": attempt + 1,
+                        "review_id": self._extract_review_id(review),
+                        "error": str(e),
+                    },
+                )
                     continue
                 else:
                     print(
