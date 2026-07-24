@@ -23,11 +23,7 @@ def chunk_list(lst, chunk_size):
 class ReviewSentimentAnalyzer:
     def __init__(self, openai_api_key: str):
         """Initialize the analyzer with OpenAI API key"""
-        self.client = openai.OpenAI(
-            api_key=openai_api_key,
-            timeout=float(os.getenv("OPENAI_TIMEOUT_SECONDS", "30.0")),
-            max_retries=0,
-        )
+        self.client = openai.OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=0)
         
         # Define sentiment analysis dimensions
         self.analysis_dimensions = [
@@ -173,19 +169,20 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                     time.sleep(wait_time)
                 
                 response = self.client.chat.completions.create(
-                    model="gpt-4",
+                    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
                     messages=[
                         {
                             "role": "system", 
-                            "content": "You are an expert sentiment analyst fluent in both Arabic and English. Respond with ONLY valid JSON. No explanatory text before or after the JSON."
+                            "content": "You are an expert sentiment analyst fluent in both Arabic and English. Respond with ONLY valid JSON matching the required schema."
                         },
                         {
                             "role": "user", 
                             "content": prompt
                         }
                     ],
-                    temperature=0.3,
-                    max_tokens=1000
+                    temperature=0.1,
+                    max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", "1000")),
+                    response_format={"type": "json_object"}
                 )
                 
                 # Get raw response
