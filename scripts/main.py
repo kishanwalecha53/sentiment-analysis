@@ -219,14 +219,9 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
             except json.JSONDecodeError as e:
                 error_msg = f"ERR_OPENAI_JSON_PARSE: JSON parsing error on attempt {attempt + 1}: {e}"
                 if attempt < retry_count:
-                logger.warning(
-                    "openai_response_json_parse_failed",
-                    extra={
-                        "attempt": attempt + 1,
-                        "review_id": self._extract_review_id(review),
-                        "error": str(e),
-                    },
-                )
+                    print(
+                        f"[tomo-id-072] OpenAI response JSON parsing failed; retrying (attempt {attempt + 1})"
+                    )
                     continue
                 else:
                     print(
@@ -649,9 +644,18 @@ Generate a summary in the following JSON format:
 
 def load_reviews_from_file(file_path: str) -> List[Dict[str, Any]]:
     """Load reviews from JSON file - handles the new input format"""
+    max_bytes = int(os.getenv("MAX_REVIEW_FILE_BYTES", str(25 * 1024 * 1024)))
+    if os.path.getsize(file_path) > max_bytes:
+        raise ValueError(f"ERR_REVIEW_FILE_TOO_LARGE: {file_path} exceeds {max_bytes} bytes")
+
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except UnicodeDecodeError as e:
+            logger.warning("review_file_encoding_fallback", extra={"file_path": file_path, "error": str(e)})
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                data = json.load(f)
         
         # Handle the new JSON structure
         if isinstance(data, dict) and 'reviews' in data:
