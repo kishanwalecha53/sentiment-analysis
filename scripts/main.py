@@ -2,11 +2,16 @@ import json
 import openai
 import time
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any
 import os
 from pathlib import Path
 import re
+import logging
+import random
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
+logger = logging.getLogger(__name__)
 
 
 def chunk_list(lst, chunk_size):
@@ -18,7 +23,16 @@ def chunk_list(lst, chunk_size):
 class ReviewSentimentAnalyzer:
     def __init__(self, openai_api_key: str):
         """Initialize the analyzer with OpenAI API key"""
-        self.client = openai.OpenAI(api_key=openai_api_key)
+        self.client = openai.OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=0)
+        
+        # Define sentiment analysis dimensions
+        self.analysis_dimensions = [
+            "Service Quality",
+            "Facility Experience", 
+            "Clinical Care",
+            "Operations",
+            "Trust & Safety"
+        ]
         
         # Define sentiment analysis dimensions
         self.analysis_dimensions = [
@@ -82,6 +96,7 @@ class ReviewSentimentAnalyzer:
         
         review_text = review.get('text', '')
         rating = review.get('rating', 0)
+        safe_review_text = review_text.replace('```', '').replace('\"\"\"', '\"\"\"')[:4000]
         
         # Check if the text appears to be in Arabic
         has_arabic = bool(re.search(r'[\u0600-\u06FF]', review_text))
@@ -90,7 +105,60 @@ class ReviewSentimentAnalyzer:
 Analyze this review using both the review text and rating to provide comprehensive sentiment analysis:
 
 **Input:**
-- Review Text: "{review_text}"
+- Review Text: "{safe_review_text}"
+- Rating: {rating}/5
+- Language: {"Arabic" if has_arabic else "English/Other"}
+
+**Analysis Instructions:**
+
+1. **Primary Classification:**
+   - If review text exists: Analyze both text sentiment and rating
+   - If review text is empty: Base classification solely on rating
+   - Rating scale: 1-2 (negative), 3 (neutral), 4-5 (positive)
+
+2. **Language Handling:**
+   - If the review is in Arabic, analyze it in Arabic but respond in English
+   - Preserve original Arabic text meaning in the analysis
+   - Key points should reflect the original Arabic sentiment
+
+3. **Conflict Detection:**
+   - If text sentiment contradicts rating, classify as "doubtful"
+   - Consider rating vs text sentiment alignment
+
+4. **Sentiment Dimensions Analysis:**
+   Identify which dimensions are mentioned:
+   - **Service Quality**: Staff behavior, communication, responsiveness
+   - **Facility Experience**: Cleanliness, infrastructure, amenities
+   - **Clinical Care**: Treatment quality, medical outcomes
+   - **Operations**: Scheduling, billing, administrative processes
+   - **Trust & Safety**: Safety protocols, privacy, reliability
+
+RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
+{{
+  "text": Actual Text you reviewd,  
+  "sentiment": "positive/negative/neutral/doubtful",
+  "confidence": 0.0,
+  "sentiment_score": 0.0,
+  "dimensions": [
+    {{
+      "name": "dimension_name",
+      "sentiment": "positive/negative/neutral",
+      "key_points": ["point1", "point2"]
+    }}
+  ],
+  "key_themes": ["theme1", "theme2"],
+  "severity": 0,
+  "summary": "Brief analysis summary"
+}}
+
+**Guidelines:**
+- sentiment_score: -1.0 (very negative) to +1.0 (very positive)
+- confidence: 0.0 to 1.0 (certainty in classification)
+- severity: 1-5 (only for negative sentiment, 1=minor, 5=critical)
+- Include only relevant dimensions that are actually mentioned
+- If no text, note "Analysis based on rating only" in summary
+- For Arabic text, ensure analysis captures cultural context
+"""
 - Rating: {rating}/5
 - Language: {"Arabic" if has_arabic else "English/Other"}
 
@@ -148,9 +216,13 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
         for attempt in range(retry_count + 1):
             try:
                 # Add exponential backoff for retries
+                # Add exponential backoff for retries
                 if attempt > 0:
-                    wait_time = (2 ** attempt) + 1
-                    print(f"  Retrying in {wait_time} seconds... (attempt {attempt + 1})")
+                    import random
+                    wait_time = min(60.0, (2 ** attempt) + random.uniform(0.0, 1.0))
+                    print(
+                        f"[tomo-id-071] Retrying OpenAI review analysis after transient failure (attempt {attempt + 1}, wait_time: {round(wait_time, 3)}s)"
+                    )
                     time.sleep(wait_time)
                 
                 response = self.client.chat.completions.create(
@@ -202,21 +274,19 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                 return result
                 
             except json.JSONDecodeError as e:
-                error_msg = f"JSON parsing error (attempt {attempt + 1}): {e}"
+                error_msg = f"ERR_OPENAI_JSON_PARSE: JSON parsing error on attempt {attempt + 1}: {e}"
                 if attempt < retry_count:
-                    print(f"  {error_msg}, retrying...")
+                    print(f"  JSON parsing error on attempt {attempt + 1}, retrying...")
                     continue
                 else:
-                    print(f"  {error_msg}, using fallback")
                     return self._create_fallback_analysis(review, error_msg)
                     
             except Exception as e:
-                error_msg = f"API error (attempt {attempt + 1}): {e}"
+                error_msg = f"ERR_OPENAI_ANALYSIS: API error on attempt {attempt + 1}: {e}"
                 if attempt < retry_count:
-                    print(f"  {error_msg}, retrying...")
+                    print(f"  API error on attempt {attempt + 1}, retrying...")
                     continue
                 else:
-                    print(f"  {error_msg}, using fallback")
                     return self._create_fallback_analysis(review, error_msg)
     
     def _create_fallback_analysis(self, review: Dict[str, Any], error_msg: str) -> Dict[str, Any]:
@@ -668,8 +738,12 @@ def main():
     
     # Get API key
     api_key = args.api_key or os.getenv('OPENAI_API_KEY')
+    # Get API key
+    api_key = args.api_key or os.getenv('OPENAI_API_KEY')
     if not api_key:
-        print("Error: OpenAI API key is required. Set OPENAI_API_KEY environment variable or use -k flag.")
+        print(
+            "Error: OpenAI API key is required. Set OPENAI_API_KEY environment variable or pass --api-key."
+        )
         return
     
     try:

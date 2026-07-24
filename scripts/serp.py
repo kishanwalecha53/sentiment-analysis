@@ -2,7 +2,12 @@ from serpapi import GoogleSearch
 from urllib.parse import urlsplit, parse_qsl
 import json
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
+import os
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
+logger = logging.getLogger(__name__)
 
 def safe_get_nested(data, *keys, default=None):
     """Safely get nested dictionary values"""
@@ -16,20 +21,26 @@ def safe_get_nested(data, *keys, default=None):
 
 def save_data_to_json(data, filename_prefix="reviews_data"):
     """Save data to JSON file with timestamp"""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    from datetime import timezone
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     filename = f"{filename_prefix}_{timestamp}.json"
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        print(f"Data saved to {filename}")
+        print(f"[tomo-id-078] Data saved to JSON file: {filename}")
         return filename
     except Exception as e:
-        print(f"Error saving to file {filename}: {e}")
+        print(f"[tomo-id-079] Failed to save JSON file {filename}: {e}")
         return None
 
-def extract_reviews():
+def extract_reviews(max_pages=500):
+    import os
+    api_key = os.getenv('SERP_API_KEY')
+    if not api_key:
+        raise ValueError("ERR_SERP_API_KEY_MISSING: Set SERP_API_KEY before extracting reviews")
+
     params = {
-        "api_key": "your_serp_api_key",
+        "api_key": api_key,
         "engine": "google_maps_reviews",
         "hl": "ar",
         "data_id": "0x3e2f039b4cec3f29:0x28429402fbebe3"
@@ -42,12 +53,16 @@ def extract_reviews():
     page_num = 0
     
     try:
-        while True:
+        max_pages = 5  # Set a reasonable limit
+        while page_num < max_pages:
             page_num += 1
             
             try:
                 results = search.get_dict()
-                print(f"Extracting reviews from page {page_num}.")
+                # logger.info(
+                #     "[tomo-id-077] Extracting reviews from SerpAPI page",
+                #     extra={"operation": "extract_reviews", "page_num": page_num, "max_pages": max_pages}
+                # )
 
                 if "error" not in results:
                     # Process reviews for current page

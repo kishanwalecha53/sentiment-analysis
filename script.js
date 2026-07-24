@@ -35,7 +35,11 @@ function getCacheWithExpiry(key) {
     }
     
     return item.value;
-  } catch (e) {
+    } catch (e) {
+    console.warn('/sentiment-analysis/script.js: [tomo-id-064] Cache entry could not be parsed and was removed', {
+      cacheKey: key,
+      errorName: e && e.name ? e.name : 'UnknownError'
+    });
     localStorage.removeItem(key);
     return null;
   }
@@ -55,13 +59,29 @@ function clearExpiredCache() {
 clearExpiredCache();
 
 // Load data
-fetch('./analysis_results.json')
-  .then(r => r.json())
+const dataLoadController = new AbortController();
+const dataLoadTimeoutId = setTimeout(() => dataLoadController.abort(), 10000);
+fetch('./analysis_results.json', { signal: dataLoadController.signal })
+  .then(r => {
+    clearTimeout(dataLoadTimeoutId);
+    if (!r.ok) {
+      throw new Error(`ERR_ANALYSIS_RESULTS_LOAD: HTTP ${r.status}`);
+    }
+    return r.json();
+  })
   .then(json => { 
     rawData = json; 
     originalDimensionSummaries = json.dimension_summaries;
     initFromData(json); 
     initializeFilters();
+  })
+  .catch(error => {
+    console.error('/sentiment-analysis/script.js: [tomo-id-065] Failed to load analysis results', {
+      operation: 'load_analysis_results',
+      errorName: error && error.name ? error.name : 'UnknownError',
+      action: 'Verify analysis_results.json is deployed and reachable.'
+    });
+    alert('Unable to load sentiment analysis results. Ref: ERR_ANALYSIS_RESULTS_LOAD');
   });
 
 function initFromData(data) {
@@ -142,6 +162,20 @@ function initializeFilters() {
   const startDate = document.getElementById('startDate');
   const endDate = document.getElementById('endDate');
   const clearCacheBtn = document.getElementById('clearCache');
+  if (!applyBtn || !clearBtn || !monthFilter || !startDate || !endDate) {
+    console.error('/sentiment-analysis/script.js: [tomo-id-066] Filter controls are missing from the DOM', {
+      operation: 'initialize_filters',
+      missingRequiredControls: {
+        applyFilter: !applyBtn,
+        clearFilter: !clearBtn,
+        monthFilter: !monthFilter,
+        startDate: !startDate,
+        endDate: !endDate
+      },
+      action: 'Verify dashboard HTML contains all filter control IDs.'
+    });
+    return;
+  }
   if (clearCacheBtn) {
     clearCacheBtn.addEventListener('click', () => {
       const keys = Object.keys(localStorage);
@@ -252,9 +286,9 @@ async function applyDateFilter(startDate, endDate) {
   const loading = document.getElementById('filterLoading');
   const applyBtn = document.getElementById('applyFilter');
   const status = document.getElementById('filterStatus');
+  const loaderShownAt = Date.now();
   
   try {
-    const loaderShownAt = Date.now();
     showFullscreenLoader();
     // Force paint before heavy work starts so overlay is visible
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -289,12 +323,23 @@ async function applyDateFilter(startDate, endDate) {
     // Check cache first
     const cacheKey = `filter_${startDate}_${endDate}`;
     const cached = getCacheWithExpiry(cacheKey); 
+    const requestId = window.crypto && typeof window.crypto.randomUUID === 'function'
+      ? window.crypto.randomUUID()
+      : `filter-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     
     if (cached) {
-      console.log('Using cached dimension summaries');
+      console.info('/sentiment-analysis/script.js: [tomo-id-067] Using cached dimension summaries', {
+        operation: 'apply_date_filter',
+        requestId,
+        cacheKey
+      });
       tempDimensionSummaries = cached;
     } else {
-      console.log('Calling API to generate summaries...');
+      console.info('/sentiment-analysis/script.js: [tomo-id-068] Requesting generated dimension summaries', {
+        operation: 'generate_summaries',
+        requestId,
+        filteredReviewCount: filtered.length
+      });
       const controller = new AbortController();
       const timeoutMs = 90000; // 90 seconds
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -304,7 +349,8 @@ async function applyDateFilter(startDate, endDate) {
         response = await fetch('https://psmmc-back.vercel.app/api/generate_summaries', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'x-request-id': requestId
           },
           body: JSON.stringify({
             reviews: filtered
@@ -352,8 +398,17 @@ async function applyDateFilter(startDate, endDate) {
     refreshInsights();
     
   } catch (error) {
-    console.error('Filter error:', error);
-    alert(`Error applying filter: ${error.message}`);
+    const errorRef = window.crypto && typeof window.crypto.randomUUID === 'function'
+      ? window.crypto.randomUUID()
+      : `filter-error-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    console.error('/sentiment-analysis/script.js: [tomo-id-069] Filter application failed', {
+      operation: 'apply_date_filter',
+      errorRef,
+      errorName: error && error.name ? error.name : 'UnknownError',
+      errorMessage: error && error.message ? error.message : 'Unknown filter failure',
+      action: 'Retry with a smaller date range or verify summary API availability.'
+    });
+    alert(`Error applying filter. Ref: ${errorRef}`);
   } finally {
     // Keep loader visible for at least 600ms to avoid flashing
     const elapsed = Date.now() - (typeof loaderShownAt !== 'undefined' ? loaderShownAt : Date.now());
@@ -571,16 +626,19 @@ function refreshInsights() {
           <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px;">
       `;
 
-      images.forEach((imageUrl, index) => {
+      images.slice(0, 12).forEach((imageUrl, index) => {
+        const safeImageUrl = escapeHtml(imageUrl);
         reviewContent += `
           <div style="position: relative; cursor: pointer;">
-            <img src="${imageUrl}" 
+            <img src="${safeImageUrl}" 
                  style="width: 80px; height: 80px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;" 
                  alt="Review image ${index + 1}"
+                 loading="lazy"
+                 referrerpolicy="no-referrer"
                  onmouseover="this.style.transform='scale(1.05)'"
                  onmouseout="this.style.transform='scale(1)'"
-                 onclick="showImageModal('${imageUrl}')"
-                 onerror="this.parentElement.innerHTML='<div style=\\'width: 80px; height: 80px; background: #f3f4f6; border: 1px solid #e2e8f0; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #9ca3af;\\'>Image unavailable</div>'">
+                 onclick="showImageModal('${safeImageUrl.replace(/'/g, "\\'")}')"
+                 onerror="this.parentElement.innerHTML='<div style=\"width: 80px; height: 80px; background: #f3f4f6; border: 1px solid #e2e8f0; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #9ca3af;\">Image unavailable</div>'">
           </div>
         `;
       });
@@ -697,21 +755,16 @@ function formatDate(dateString) {
     // Check if valid date
     if (isNaN(date.getTime())) return dateString;
     
-    // Format: "September 4, 2025"
-    const options = { year: 'numeric', month: 'long', day: 'numeric' };
+    // Format using UTC to avoid server/client timezone drift in report dates.
+    const options = { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' };
     return date.toLocaleDateString('en-US', options);
     
-    // Alternative shorter format: "Sep 4, 2025"
-    // const options = { year: 'numeric', month: 'short', day: 'numeric' };
-    // return date.toLocaleDateString('en-US', options);
-    
-    // Alternative format: "04/09/2025" (DD/MM/YYYY)
-    // const day = String(date.getDate()).padStart(2, '0');
-    // const month = String(date.getMonth() + 1).padStart(2, '0');
-    // const year = date.getFullYear();
-    // return `${day}/${month}/${year}`;
-    
   } catch (error) {
+    console.warn('/sentiment-analysis/script.js: [tomo-id-070] Review date formatting failed', {
+      operation: 'format_review_date',
+      inputLength: String(dateString).length,
+      errorName: error && error.name ? error.name : 'UnknownError'
+    });
     return dateString;
   }
 }
