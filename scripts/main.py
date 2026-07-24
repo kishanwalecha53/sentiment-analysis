@@ -242,25 +242,6 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                     )
                     return self._create_fallback_analysis(review, error_msg)
     
-    def _coerce_float(self, value: Any, default: float = 0.0) -> float:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            logger.warning("llm_numeric_field_invalid", extra={"value": str(value)[:32]})
-            return default
-
-    def _coerce_analysis_result(self, analysis_result: Dict[str, Any]) -> Dict[str, Any]:
-        analysis_result["confidence"] = max(0.0, min(1.0, self._coerce_float(analysis_result.get("confidence"), 0.0)))
-        analysis_result["sentiment_score"] = max(-1.0, min(1.0, self._coerce_float(analysis_result.get("sentiment_score"), 0.0)))
-        analysis_result["severity"] = int(max(0, min(5, self._coerce_float(analysis_result.get("severity"), 0.0))))
-        if analysis_result.get("sentiment") not in {"positive", "negative", "neutral", "doubtful"}:
-            analysis_result["sentiment"] = "neutral"
-        if not isinstance(analysis_result.get("dimensions"), list):
-            analysis_result["dimensions"] = []
-        if not isinstance(analysis_result.get("key_themes"), list):
-            analysis_result["key_themes"] = []
-        return analysis_result
-
     def _create_fallback_analysis(self, review: Dict[str, Any], error_msg: str) -> Dict[str, Any]:
         """Create a fallback analysis when API call fails"""
         rating = review.get('rating', 0)
@@ -702,7 +683,7 @@ def main():
     parser.add_argument('input_file', help='Path to input JSON file containing reviews')
     parser.add_argument('-o', '--output', help='Output file path (default: analysis_results.json)', 
                        default='analysis_results.json')
-    parser.add_argument('-k', '--api-key', help='OpenAI API key (or set OPENAI_API_KEY env var)')
+    parser.add_argument('-k', '--api-key', help='OpenAI API key (prefer OPENAI_API_KEY env var; command-line values may be visible in process listings)')
     parser.add_argument('-d', '--delay', type=float, default=1.0, 
                        help='Delay between API calls in seconds (default: 1.0)')
     
