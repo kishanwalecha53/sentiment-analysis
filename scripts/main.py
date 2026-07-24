@@ -388,11 +388,20 @@ Generate a summary in the following JSON format:
                     max_tokens=800
                 )
                 
-                raw_response = response.choices[0].message.content
-                cleaned_response = self._clean_openai_response(raw_response)
-                summary_result = json.loads(cleaned_response)
-                
-                summaries[sentiment_type] = summary_result
+                try:
+                    raw_response = response.choices[0].message.content
+                    if not raw_response:
+                        raise ValueError("Empty response from OpenAI")
+                    cleaned_response = self._clean_openai_response(raw_response)
+                    summary_result = json.loads(cleaned_response)
+                    summaries[sentiment_type] = summary_result
+                except json.JSONDecodeError as e:
+                    logger.warning("sentiment_summary_json_invalid", extra={"sentiment_type": sentiment_type, "error": str(e)})
+                    summaries[sentiment_type] = {
+                        "summary": f"Summary generation returned invalid JSON for {sentiment_type} reviews.",
+                        "key_insights": [f"Analysis failed for {len(filtered_reviews)} {sentiment_type} reviews"],
+                        "recommendations": ["Manual review recommended due to analysis failure"]
+                    }
                 
             except Exception as e:
                 print(f"Error generating {sentiment_type} summary: {e}")
@@ -683,7 +692,7 @@ def main():
     parser.add_argument('input_file', help='Path to input JSON file containing reviews')
     parser.add_argument('-o', '--output', help='Output file path (default: analysis_results.json)', 
                        default='analysis_results.json')
-    parser.add_argument('-k', '--api-key', help='OpenAI API key (prefer OPENAI_API_KEY env var; command-line values may be visible in process listings)')
+    parser.add_argument('-k', '--api-key', help='OpenAI API key (or set OPENAI_API_KEY env var)')
     parser.add_argument('-d', '--delay', type=float, default=1.0, 
                        help='Delay between API calls in seconds (default: 1.0)')
     
