@@ -2,11 +2,16 @@ import json
 import openai
 import time
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any
 import os
 from pathlib import Path
 import re
+import logging
+import random
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
+logger = logging.getLogger(__name__)
 
 
 def chunk_list(lst, chunk_size):
@@ -18,7 +23,16 @@ def chunk_list(lst, chunk_size):
 class ReviewSentimentAnalyzer:
     def __init__(self, openai_api_key: str):
         """Initialize the analyzer with OpenAI API key"""
-        self.client = openai.OpenAI(api_key=openai_api_key)
+        self.client = openai.OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=0)
+        
+        # Define sentiment analysis dimensions
+        self.analysis_dimensions = [
+            "Service Quality",
+            "Facility Experience", 
+            "Clinical Care",
+            "Operations",
+            "Trust & Safety"
+        ]
         
         # Define sentiment analysis dimensions
         self.analysis_dimensions = [
@@ -80,17 +94,15 @@ class ReviewSentimentAnalyzer:
     def analyze_single_review(self, review: Dict[str, Any], retry_count: int = 2) -> Dict[str, Any]:
         """Analyze sentiment for a single review with retry logic"""
         
+    def analyze_single_review(self, review: Dict[str, Any], retry_count: int = 2) -> Dict[str, Any]:
+        """Analyze sentiment for a single review with retry logic"""
+        
         review_text = review.get('text', '')
         rating = review.get('rating', 0)
+        safe_review_text = review_text.replace('```', '').replace('"""', '\"\"\"')[:4000]
         
         # Check if the text appears to be in Arabic
         has_arabic = bool(re.search(r'[\u0600-\u06FF]', review_text))
-        
-        prompt = f"""
-Analyze this review using both the review text and rating to provide comprehensive sentiment analysis:
-
-**Input:**
-- Review Text: "{review_text}"
 - Rating: {rating}/5
 - Language: {"Arabic" if has_arabic else "English/Other"}
 
@@ -149,8 +161,11 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
             try:
                 # Add exponential backoff for retries
                 if attempt > 0:
-                    wait_time = (2 ** attempt) + 1
-                    print(f"  Retrying in {wait_time} seconds... (attempt {attempt + 1})")
+                    import random
+                    wait_time = min(60.0, (2 ** attempt) + random.uniform(0.0, 1.0))
+                    print(
+                        f"[tomo-id-071] Retrying OpenAI review analysis after transient failure (attempt {attempt + 1}, wait_time: {round(wait_time, 3)}s)"
+                    )
                     time.sleep(wait_time)
                 
                 response = self.client.chat.completions.create(
@@ -202,21 +217,19 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                 return result
                 
             except json.JSONDecodeError as e:
-                error_msg = f"JSON parsing error (attempt {attempt + 1}): {e}"
+                error_msg = f"ERR_OPENAI_JSON_PARSE: JSON parsing error on attempt {attempt + 1}: {e}"
                 if attempt < retry_count:
-                    print(f"  {error_msg}, retrying...")
+                    print(f"  JSON parsing failed, retrying...")
                     continue
                 else:
-                    print(f"  {error_msg}, using fallback")
                     return self._create_fallback_analysis(review, error_msg)
                     
             except Exception as e:
-                error_msg = f"API error (attempt {attempt + 1}): {e}"
+                error_msg = f"ERR_OPENAI_ANALYSIS: API error on attempt {attempt + 1}: {e}"
                 if attempt < retry_count:
-                    print(f"  {error_msg}, retrying...")
+                    print(f"  API error, retrying...")
                     continue
                 else:
-                    print(f"  {error_msg}, using fallback")
                     return self._create_fallback_analysis(review, error_msg)
     
     def _create_fallback_analysis(self, review: Dict[str, Any], error_msg: str) -> Dict[str, Any]:
@@ -668,8 +681,12 @@ def main():
     
     # Get API key
     api_key = args.api_key or os.getenv('OPENAI_API_KEY')
+    # Get API key
+    api_key = args.api_key or os.getenv('OPENAI_API_KEY')
     if not api_key:
-        print("Error: OpenAI API key is required. Set OPENAI_API_KEY environment variable or use -k flag.")
+        print(
+            "Error: OpenAI API key is required. Set OPENAI_API_KEY environment variable or pass --api-key."
+        )
         return
     
     try:
