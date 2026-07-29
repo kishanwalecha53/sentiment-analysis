@@ -23,7 +23,13 @@ def chunk_list(lst, chunk_size):
 class ReviewSentimentAnalyzer:
     def __init__(self, openai_api_key: str):
         """Initialize the analyzer with OpenAI API key"""
-        self.client = openai.OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=0)
+        self.client = openai.OpenAI(
+            api_key=openai_api_key,
+            timeout=float(os.getenv("OPENAI_TIMEOUT_SECONDS", "30")),
+            max_retries=0,
+        )
+        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        self.request_delay_seconds = float(os.getenv("OPENAI_REQUEST_DELAY_SECONDS", "1.0"))
         
         # Define sentiment analysis dimensions
         self.analysis_dimensions = [
@@ -163,8 +169,14 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                 if attempt > 0:
                     import random
                     wait_time = min(60.0, (2 ** attempt) + random.uniform(0.0, 1.0))
-                    print(
-                        f"[tomo-id-071] Retrying OpenAI review analysis after transient failure (attempt {attempt + 1}, wait_time: {round(wait_time, 3)}s)"
+                    logger.warning(
+                        "Retrying OpenAI review analysis after transient failure",
+                        extra={
+                            "event": "openai_review_retry",
+                            "attempt": attempt + 1,
+                            "wait_time_seconds": round(wait_time, 3),
+                            "review_id": self._extract_review_id(review),
+                        },
                     )
                     time.sleep(wait_time)
                 
@@ -634,9 +646,21 @@ Generate a summary in the following JSON format:
 
 def load_reviews_from_file(file_path: str) -> List[Dict[str, Any]]:
     """Load reviews from JSON file - handles the new input format"""
+    max_input_bytes = int(os.getenv("REVIEWS_INPUT_MAX_BYTES", str(25 * 1024 * 1024)))
+    if Path(file_path).stat().st_size > max_input_bytes:
+        raise ValueError(f"Input file exceeds REVIEWS_INPUT_MAX_BYTES={max_input_bytes}: {file_path}")
+
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except UnicodeDecodeError as e:
+            logger.error(
+                "ERR_REVIEW_FILE_ENCODING: replacing invalid UTF-8 bytes while loading reviews",
+                extra={"file_path": file_path, "error": str(e)},
+            )
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                data = json.load(f)
         
         # Handle the new JSON structure
         if isinstance(data, dict) and 'reviews' in data:
