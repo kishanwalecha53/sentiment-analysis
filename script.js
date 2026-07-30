@@ -18,6 +18,7 @@ function setCacheWithExpiry(key, value) {
   localStorage.setItem(key, JSON.stringify(item));
 }
 
+// Tomosu AI Recommendation: Logged corrupt cache entries before fallback so support can diagnose silent localStorage degradation.
 function getCacheWithExpiry(key) {
   const itemStr = localStorage.getItem(key);
   
@@ -36,6 +37,12 @@ function getCacheWithExpiry(key) {
     
     return item.value;
   } catch (e) {
+    console.warn('[tomo-id-065] Cache entry was invalid and removed', {
+      operation: 'getCacheWithExpiry',
+      cacheKey: key,
+      errorName: e.name,
+      action: 'Regenerate summaries for this date filter if repeated cache misses occur.'
+    });
     localStorage.removeItem(key);
     return null;
   }
@@ -54,15 +61,33 @@ function clearExpiredCache() {
 // Clear expired cache on page load
 clearExpiredCache();
 
-// Load data
-fetch('./analysis_results.json')
-  .then(r => r.json())
+// Tomosu AI Recommendation: Added timeout and contextual failure logging so the dashboard fails visibly instead of silently hanging on data load.
+const analysisResultsController = new AbortController();
+const analysisResultsTimeoutId = setTimeout(() => analysisResultsController.abort(), 10000);
+
+fetch('./analysis_results.json', { signal: analysisResultsController.signal })
+  .then(r => {
+    if (!r.ok) {
+      throw new Error(`analysis_results.json load failed with HTTP ${r.status}`);
+    }
+    return r.json();
+  })
   .then(json => { 
     rawData = json; 
     originalDimensionSummaries = json.dimension_summaries;
     initFromData(json); 
     initializeFilters();
-  });
+  })
+  .catch(error => {
+    console.error('[tomo-id-064] Failed to load dashboard analysis data', {
+      operation: 'load_analysis_results',
+      errorName: error.name,
+      errorMessage: error.message,
+      action: 'Verify analysis_results.json exists and is reachable before opening the dashboard.'
+    });
+    alert('Unable to load analysis results. Please verify the data file is available and refresh the page.');
+  })
+  .finally(() => clearTimeout(analysisResultsTimeoutId));
 
 function initFromData(data) {
   rawData = data;
@@ -261,7 +286,7 @@ async function applyDateFilter(startDate, endDate) {
     loading.style.display = 'flex';
     applyBtn.disabled = true;
     
-    // Filter reviews by date
+    // Tomosu AI Recommendation: Capped filter payload size to prevent one browser action from overloading API summarization.
     const filtered = rawData.analyzed_reviews.filter(review => {
       const reviewDateStr = review.date;
       if (!reviewDateStr) return false;
@@ -274,7 +299,19 @@ async function applyDateFilter(startDate, endDate) {
       return reviewDate >= start && reviewDate <= end;
     });
     
-    console.log(`Filtered ${filtered.length} reviews from ${rawData.analyzed_reviews.length} total`);
+    const maxFilterReviews = 1000;
+    if (filtered.length > maxFilterReviews) {
+      console.warn('[tomo-id-066] Date filter result exceeded safe summarization limit', {
+        operation: 'applyDateFilter',
+        filteredCount: filtered.length,
+        maxFilterReviews,
+        action: 'Narrow the date range before generating AI summaries.'
+      });
+      alert(`The selected date range includes ${filtered.length} reviews. Please narrow the range to ${maxFilterReviews} reviews or fewer.`);
+      loading.style.display = 'none';
+      applyBtn.disabled = false;
+      return;
+    }
     
     if (filtered.length === 0) {
       alert('No reviews found in selected date range');
@@ -295,6 +332,10 @@ async function applyDateFilter(startDate, endDate) {
       tempDimensionSummaries = cached;
     } else {
       console.log('Calling API to generate summaries...');
+      // Tomosu AI Recommendation: Added correlation ID propagation and contextual API failure logs to make summary-generation incidents traceable.
+      const correlationId = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+        ? crypto.randomUUID()
+        : `filter-${Date.now()}`;
       const controller = new AbortController();
       const timeoutMs = 90000; // 90 seconds
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -304,7 +345,8 @@ async function applyDateFilter(startDate, endDate) {
         response = await fetch('https://psmmc-back.vercel.app/api/generate_summaries', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'x-request-id': correlationId
           },
           body: JSON.stringify({
             reviews: filtered
@@ -312,15 +354,26 @@ async function applyDateFilter(startDate, endDate) {
           signal: controller.signal
         });
       } catch (err) {
-        clearTimeout(timeoutId);
         if (err && err.name === 'AbortError') {
-          throw new Error('Request timed out after 90 seconds');
+          console.error('[tomo-id-067] Summary generation API timed out', {
+            operation: 'generate_summaries',
+            correlationId,
+            timeoutMs,
+            action: 'Check backend summary API latency and retry with a narrower date range.'
+          });
+          throw new Error(`Summary generation timed out after ${timeoutMs / 1000} seconds. Reference: ${correlationId}`);
         }
+        console.error('[tomo-id-068] Summary generation API request failed', {
+          operation: 'generate_summaries',
+          correlationId,
+          errorName: err && err.name,
+          errorMessage: err && err.message,
+          action: 'Verify psmmc-back availability and network connectivity.'
+        });
         throw err;
+      } finally {
+        clearTimeout(timeoutId);
       }
-      clearTimeout(timeoutId);
-      
-      console.log('Response status:', response.status);
       
       const responseText = await response.text();
       
@@ -419,21 +472,22 @@ function renderDimensionButtons() {
     btn.className = 'dim-btn' + (dim === selectedDimension ? ' active' : '');
     btn.innerHTML = `${dim} <span style="font-size: 16px;">(${dimensionCounts[dim]})</span>`;
     
-    btn.onclick = () => {
-      selectedDimension = dim;
-      document.querySelectorAll('.dim-btn').forEach(x => x.classList.remove('active'));
-      btn.classList.add('active');
-      refreshInsights();
-    };
-    
-    db.appendChild(btn);
-  });
-}
-// Get current reviews based on filter state
-function getCurrentReviews() {
-  return isFilterActive && filteredReviewsData ? filteredReviewsData : rawData.analyzed_reviews;
-}
-
+      // Tomosu AI Recommendation: Escaped review image URLs before HTML insertion to prevent patient review media from becoming an XSS vector.
+      images.forEach((imageUrl, index) => {
+        const safeImageUrl = escapeHtml(imageUrl);
+        const modalImageUrl = encodeURIComponent(imageUrl);
+        reviewContent += `
+          <div style="position: relative; cursor: pointer;">
+            <img src="${safeImageUrl}" 
+                 style="width: 80px; height: 80px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;" 
+                 alt="Review image ${index + 1}"
+                 onmouseover="this.style.transform='scale(1.05)'"
+                 onmouseout="this.style.transform='scale(1)'"
+                 onclick="showImageModal(decodeURIComponent('${modalImageUrl}'))"
+                 onerror="this.parentElement.innerHTML='<div style=\'width: 80px; height: 80px; background: #f3f4f6; border: 1px solid #e2e8f0; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #9ca3af;\'>Image unavailable</div>'">
+          </div>
+        `;
+      });
 // Update sentiment card counts based on current reviews
 function updateSentimentCounts() {
   const reviews = getCurrentReviews();

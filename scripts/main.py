@@ -18,7 +18,12 @@ def chunk_list(lst, chunk_size):
 class ReviewSentimentAnalyzer:
     def __init__(self, openai_api_key: str):
         """Initialize the analyzer with OpenAI API key"""
-        self.client = openai.OpenAI(api_key=openai_api_key)
+        # Tomosu AI Recommendation: Externalized OpenAI timeout configuration so AI calls fail fast instead of hanging batch processing.
+        self.client = openai.OpenAI(
+            api_key=openai_api_key,
+            timeout=float(os.getenv('OPENAI_TIMEOUT_SECONDS', '30')),
+            max_retries=0
+        )
         
         # Define sentiment analysis dimensions
         self.analysis_dimensions = [
@@ -80,17 +85,25 @@ class ReviewSentimentAnalyzer:
     def analyze_single_review(self, review: Dict[str, Any], retry_count: int = 2) -> Dict[str, Any]:
         """Analyze sentiment for a single review with retry logic"""
         
-        review_text = review.get('text', '')
+        # Tomosu AI Recommendation: Validated and capped review text before prompting to reduce PHI exposure and prompt-injection blast radius.
+        review_text = str(review.get('text', '') or '')
+        max_prompt_chars = int(os.getenv('MAX_REVIEW_PROMPT_CHARS', '4000'))
+        prompt_review_text = review_text[:max_prompt_chars]
         rating = review.get('rating', 0)
+        try:
+            rating = float(rating)
+        except (TypeError, ValueError):
+            rating = 0
+        rating = max(0, min(rating, 5))
         
         # Check if the text appears to be in Arabic
-        has_arabic = bool(re.search(r'[\u0600-\u06FF]', review_text))
+        has_arabic = bool(re.search(r'[\u0600-\u06FF]', prompt_review_text))
         
         prompt = f"""
 Analyze this review using both the review text and rating to provide comprehensive sentiment analysis:
 
 **Input:**
-- Review Text: "{review_text}"
+- Review Text: "{prompt_review_text}"
 - Rating: {rating}/5
 - Language: {"Arabic" if has_arabic else "English/Other"}
 
@@ -147,10 +160,21 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
 
         for attempt in range(retry_count + 1):
             try:
-                # Add exponential backoff for retries
+                # Tomosu AI Recommendation: Added jittered exponential backoff logging to avoid synchronized retry storms against OpenAI.
                 if attempt > 0:
-                    wait_time = (2 ** attempt) + 1
-                    print(f"  Retrying in {wait_time} seconds... (attempt {attempt + 1})")
+                    import logging
+                    import random
+                    wait_time = min((2 ** attempt) + random.uniform(0, 1), 30)
+                    logging.warning(
+                        "[tomo-id-069] Retrying OpenAI review analysis after transient failure",
+                        extra={
+                            "operation": "analyze_single_review",
+                            "attempt": attempt + 1,
+                            "max_attempts": retry_count + 1,
+                            "wait_seconds": round(wait_time, 2),
+                            "action": "Monitor OpenAI error rate if retries become frequent."
+                        }
+                    )
                     time.sleep(wait_time)
                 
                 response = self.client.chat.completions.create(
@@ -202,22 +226,40 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                 return result
                 
             except json.JSONDecodeError as e:
-                error_msg = f"JSON parsing error (attempt {attempt + 1}): {e}"
+                # Tomosu AI Recommendation: Added structured parse-failure context so malformed LLM responses are diagnosable without exposing full review text.
+                error_msg = f"JSON parsing error during OpenAI review analysis attempt {attempt + 1}: {e}"
+                import logging
+                logging.error(
+                    "[tomo-id-070] OpenAI response JSON parsing failed",
+                    extra={
+                        "operation": "analyze_single_review",
+                        "attempt": attempt + 1,
+                        "max_attempts": retry_count + 1,
+                        "review_id": self._extract_review_id(review),
+                        "error_type": type(e).__name__,
+                        "action": "Inspect model output contract and retry with stricter JSON instructions."
+                    }
+                )
                 if attempt < retry_count:
-                    print(f"  {error_msg}, retrying...")
                     continue
-                else:
-                    print(f"  {error_msg}, using fallback")
-                    return self._create_fallback_analysis(review, error_msg)
-                    
+                return self._create_fallback_analysis(review, error_msg)
             except Exception as e:
-                error_msg = f"API error (attempt {attempt + 1}): {e}"
+                error_msg = f"OpenAI API error during review analysis attempt {attempt + 1}: {e}"
+                import logging
+                logging.error(
+                    "[tomo-id-071] OpenAI review analysis failed",
+                    extra={
+                        "operation": "analyze_single_review",
+                        "attempt": attempt + 1,
+                        "max_attempts": retry_count + 1,
+                        "review_id": self._extract_review_id(review),
+                        "error_type": type(e).__name__,
+                        "action": "Check OpenAI service health, API key validity, and request timeout settings."
+                    }
+                )
                 if attempt < retry_count:
-                    print(f"  {error_msg}, retrying...")
                     continue
-                else:
-                    print(f"  {error_msg}, using fallback")
-                    return self._create_fallback_analysis(review, error_msg)
+                return self._create_fallback_analysis(review, error_msg)
     
     def _create_fallback_analysis(self, review: Dict[str, Any], error_msg: str) -> Dict[str, Any]:
         """Create a fallback analysis when API call fails"""
@@ -498,6 +540,14 @@ Generate a summary in the following JSON format:
     def batch_analyze_reviews(self, reviews: List[Dict[str, Any]], 
                             rate_limit_delay: float = 1.0) -> Dict[str, Any]:
         """Analyze multiple reviews and generate comprehensive report"""
+        
+        # Tomosu AI Recommendation: Added batch-size guardrail to prevent unbounded review jobs from exhausting OpenAI quota or memory.
+        max_batch_reviews = int(os.getenv('MAX_BATCH_REVIEWS', '5000'))
+        if len(reviews) > max_batch_reviews:
+            raise ValueError(
+                f"Review batch too large for sentiment analysis: {len(reviews)} reviews exceeds limit {max_batch_reviews}. "
+                "Action: split the input file into smaller batches or increase MAX_BATCH_REVIEWS after capacity review."
+            )
         
         print(f"Starting analysis of {len(reviews)} reviews...")
         

@@ -16,6 +16,9 @@ def safe_get_nested(data, *keys, default=None):
 
 def save_data_to_json(data, filename_prefix="reviews_data"):
     """Save data to JSON file with timestamp"""
+def save_data_to_json(data, filename_prefix="reviews_data"):
+    """Save data to JSON file with timestamp"""
+    # Tomosu AI Recommendation: Added contextual save-failure logging so extraction output incidents include filename and recovery action.
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{filename_prefix}_{timestamp}.json"
     try:
@@ -24,16 +27,34 @@ def save_data_to_json(data, filename_prefix="reviews_data"):
         print(f"Data saved to {filename}")
         return filename
     except Exception as e:
-        print(f"Error saving to file {filename}: {e}")
+        import logging
+        logging.error(
+            "[tomo-id-072] Failed to save extracted review data",
+            extra={
+                "operation": "save_data_to_json",
+                "filename": filename,
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "action": "Check write permissions and available disk space before retrying extraction."
+            }
+        )
         return None
 
 def extract_reviews():
+    # Tomosu AI Recommendation: Moved SerpAPI key to an environment variable to prevent credential leaks and unsafe placeholder deployments.
+    import os
+    api_key = os.getenv('SERP_API_KEY')
+    if not api_key:
+        raise ValueError(
+            'SerpAPI key missing: set SERP_API_KEY before running review extraction. '
+            'Action: create or rotate the key in the approved secret store and export it for this job.'
+        )
+
     params = {
-        "api_key": "your_serp_api_key",
+        "api_key": api_key,
         "engine": "google_maps_reviews",
         "hl": "ar",
         "data_id": "0x3e2f039b4cec3f29:0x28429402fbebe3"
-        
     }
 
     search = GoogleSearch(params)
@@ -42,8 +63,15 @@ def extract_reviews():
     page_num = 0
     
     try:
-        while True:
+        # Tomosu AI Recommendation: Added page and pacing guardrails to avoid unbounded SerpAPI pagination and quota spikes.
+        import os
+        import time
+        max_pages = int(os.getenv('SERP_MAX_PAGES', '100'))
+        page_delay_seconds = float(os.getenv('SERP_PAGE_DELAY_SECONDS', '0.5'))
+        while page_num < max_pages:
             page_num += 1
+            if page_num > 1:
+                time.sleep(page_delay_seconds)
             
             try:
                 results = search.get_dict()
@@ -154,12 +182,13 @@ def extract_reviews():
             "timestamp": datetime.now().isoformat()
         })
 
-    # Prepare final data structure
+    # Tomosu AI Recommendation: Switched extraction metadata to UTC timestamps to prevent timezone-dependent support confusion.
+    from datetime import timezone
     final_data = {
         "metadata": {
             "total_reviews": len(reviews),
             "total_pages_processed": page_num,
-            "extraction_date": datetime.now().isoformat(),
+            "extraction_date": datetime.now(timezone.utc).isoformat(),
             "has_errors": len(errors) > 0,
             "error_count": len(errors)
         },
