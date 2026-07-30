@@ -54,15 +54,33 @@ function clearExpiredCache() {
 // Clear expired cache on page load
 clearExpiredCache();
 
-// Load data
-fetch('./analysis_results.json')
-  .then(r => r.json())
+// Tomosu AI Recommendation: Added timeout and contextual failure logging so the dashboard fails visibly instead of silently hanging on data load.
+const analysisResultsController = new AbortController();
+const analysisResultsTimeoutId = setTimeout(() => analysisResultsController.abort(), 10000);
+
+fetch('./analysis_results.json', { signal: analysisResultsController.signal })
+  .then(r => {
+    if (!r.ok) {
+      throw new Error(`analysis_results.json load failed with HTTP ${r.status}`);
+    }
+    return r.json();
+  })
   .then(json => { 
     rawData = json; 
     originalDimensionSummaries = json.dimension_summaries;
     initFromData(json); 
     initializeFilters();
-  });
+  })
+  .catch(error => {
+    console.error('[tomo-id-064] Failed to load dashboard analysis data', {
+      operation: 'load_analysis_results',
+      errorName: error.name,
+      errorMessage: error.message,
+      action: 'Verify analysis_results.json exists and is reachable before opening the dashboard.'
+    });
+    alert('Unable to load analysis results. Please verify the data file is available and refresh the page.');
+  })
+  .finally(() => clearTimeout(analysisResultsTimeoutId));
 
 function initFromData(data) {
   rawData = data;
