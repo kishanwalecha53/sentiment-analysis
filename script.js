@@ -152,7 +152,7 @@ function hideFullscreenLoader() {
   }
 }
 
-// Filter functionality
+
 function initializeFilters() {
   const applyBtn = document.getElementById('applyFilter');
   const clearBtn = document.getElementById('clearFilter');
