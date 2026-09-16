@@ -28,7 +28,7 @@ function getCacheWithExpiry(key) {
   try {
     const item = JSON.parse(itemStr);
     
-    // Check if expired
+
     if (Date.now() > item.expiry) {
       localStorage.removeItem(key);
       return null;
