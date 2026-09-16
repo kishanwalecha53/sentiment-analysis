@@ -7,7 +7,7 @@ let selectedDimension = 'Service Quality';
 let isFilterActive = false;
 const dimensions = ['Service Quality', 'Facility Experience', 'Trust & Safety', 'Clinical Care', 'Operations'];
 
-// Cache management with expiration
+
 const CACHE_DURATION = 12 * 60 * 60 * 1000; // 12 hours in milliseconds
 
 function setCacheWithExpiry(key, value) {
