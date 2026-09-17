@@ -8,7 +8,7 @@ let isFilterActive = false;
 const dimensions = ['Service Quality', 'Facility Experience', 'Trust & Safety', 'Clinical Care', 'Operations'];
 
 
-const CACHE_DURATION = 12 * 60 * 60 * 1000; // 12 hours 
+const CACHE_DURATION = 12 * 60 * 60 * 1000; // 12 hours in
 
 function setCacheWithExpiry(key, value) {
   const item = {
