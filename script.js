@@ -7,8 +7,8 @@ let selectedDimension = 'Service Quality';
 let isFilterActive = false;
 const dimensions = ['Service Quality', 'Facility Experience', 'Trust & Safety', 'Clinical Care', 'Operations'];
 
-// Cache management with expiration
-const CACHE_DURATION = 12 * 60 * 60 * 1000; // 12 hours in milliseconds
+
+const CACHE_DURATION = 12 * 60 * 60 * 1000; // 12 hours in mili secondss
 
 function setCacheWithExpiry(key, value) {
   const item = {
@@ -29,7 +29,7 @@ function getCacheWithExpiry(key) {
   try {
     const item = JSON.parse(itemStr);
     
-    // Check if expired
+
     if (Date.now() > item.expiry) {
       localStorage.removeItem(key);
       return null;
@@ -146,7 +146,7 @@ function showFullscreenLoader() {
     document.body.appendChild(loader);
   }
   loader.classList.add('active');
-  // Disable all buttons
+  // Disable all buttons in the app
   document.querySelectorAll('button').forEach(btn => btn.disabled = true);
 }
 
@@ -159,7 +159,7 @@ function hideFullscreenLoader() {
   }
 }
 
-// Filter functionality
+
 function initializeFilters() {
   const applyBtn = document.getElementById('applyFilter');
   const clearBtn = document.getElementById('clearFilter');
