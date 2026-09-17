@@ -139,7 +139,7 @@ function showFullscreenLoader() {
     document.body.appendChild(loader);
   }
   loader.classList.add('active');
-  // Disable all buttons
+  // Disable all buttons in the app
   document.querySelectorAll('button').forEach(btn => btn.disabled = true);
 }
 
