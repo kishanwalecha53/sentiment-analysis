@@ -15,6 +15,103 @@ def chunk_list(lst, chunk_size):
         yield lst[i:i + chunk_size]
 
 
+# Tomosu AI Recommendation: Added a tool the model can call to escalate a review
+# instead of just labelling severity in free text — makes the escalation an
+# explicit, auditable action rather than something a downstream consumer has
+# to infer by re-parsing the analysis JSON.
+ESCALATION_LOG_PATH = os.getenv('ESCALATION_LOG_PATH', 'critical_review_escalations.jsonl')
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "flag_critical_review",
+            "description": (
+                "Escalate a review that describes a patient-safety, clinical-risk, "
+                "or trust-and-safety issue requiring human follow-up. Call this "
+                "only for genuinely critical issues (severity 4-5), not routine "
+                "negative feedback."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "review_id": {"type": "string"},
+                    "severity": {"type": "integer", "minimum": 1, "maximum": 5},
+                    "reason": {
+                        "type": "string",
+                        "description": "One sentence describing why this needs escalation.",
+                    },
+                },
+                "required": ["review_id", "severity", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_review_history",
+            "description": (
+                "Look up whether this reviewer (by name) has filed prior reviews, "
+                "to check if this is a recurring complaint pattern before deciding "
+                "on severity. Returns a short text summary."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "author_name": {"type": "string"},
+                },
+                "required": ["author_name"],
+            },
+        },
+    },
+]
+
+
+def flag_critical_review(review_id: str, severity: int, reason: str) -> Dict[str, Any]:
+    """Execute the model's escalation request: append an audit record.
+
+    Stubbed persistence — appends to a local JSONL file so escalations are
+    durable and reviewable, without requiring a ticketing-system integration
+    for this script to run standalone.
+    """
+    record = {
+        "review_id": review_id,
+        "severity": severity,
+        "reason": reason,
+        "escalated_at": datetime.now().isoformat(),
+    }
+    try:
+        with open(ESCALATION_LOG_PATH, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(record, ensure_ascii=False) + '\n')
+    except OSError as e:
+        import logging
+        logging.error(
+            "[tomo-id-072] Failed to persist critical-review escalation",
+            extra={
+                "operation": "flag_critical_review",
+                "review_id": review_id,
+                "error_type": type(e).__name__,
+                "action": "Check ESCALATION_LOG_PATH is writable; escalation was not recorded.",
+            },
+        )
+        return {"status": "error", "message": f"Could not persist escalation: {e}"}
+    return {"status": "escalated", "review_id": review_id}
+
+
+def lookup_review_history(author_name: str) -> Dict[str, Any]:
+    """Stub: in production this would query the reviews DB for prior entries
+    by this author. Returns a neutral placeholder so the tool-calling loop
+    has a real result to feed back to the model.
+    """
+    return {"author_name": author_name, "prior_reviews_found": 0, "note": "lookup not yet wired to a data source"}
+
+
+TOOL_DISPATCH = {
+    "flag_critical_review": lambda args: flag_critical_review(**args),
+    "lookup_review_history": lambda args: lookup_review_history(**args),
+}
+
+
 class ReviewSentimentAnalyzer:
     def __init__(self, openai_api_key: str):
         """Initialize the analyzer with OpenAI API key"""
@@ -24,21 +121,21 @@ class ReviewSentimentAnalyzer:
             timeout=float(os.getenv('OPENAI_TIMEOUT_SECONDS', '30')),
             max_retries=0
         )
-        
+
         # Define sentiment analysis dimensions
         self.analysis_dimensions = [
             "Service Quality",
-            "Facility Experience", 
+            "Facility Experience",
             "Clinical Care",
             "Operations",
             "Trust & Safety"
         ]
-    
+
     def _clean_openai_response(self, response_text: str) -> str:
         """Clean OpenAI response to extract valid JSON"""
         if not response_text or not response_text.strip():
             raise ValueError("Empty response from OpenAI")
-        
+
         # Remove common prefixes that OpenAI might add
         prefixes_to_remove = [
             "Here's the analysis:",
@@ -47,27 +144,27 @@ class ReviewSentimentAnalyzer:
             "```json",
             "```"
         ]
-        
+
         cleaned = response_text.strip()
-        
+
         # Remove prefixes
         for prefix in prefixes_to_remove:
             if cleaned.lower().startswith(prefix.lower()):
                 cleaned = cleaned[len(prefix):].strip()
-        
+
         # Remove trailing ```
         if cleaned.endswith("```"):
             cleaned = cleaned[:-3].strip()
-        
+
         # Try to find JSON boundaries
         json_start = cleaned.find('{')
         json_end = cleaned.rfind('}')
-        
+
         if json_start != -1 and json_end != -1 and json_end > json_start:
             cleaned = cleaned[json_start:json_end+1]
-        
+
         return cleaned
-    
+
     def _extract_review_id(self, review: Dict[str, Any]) -> str:
         """Extract review ID from the review link or generate one"""
         link = review.get('link', '')
@@ -75,16 +172,54 @@ class ReviewSentimentAnalyzer:
             match = re.search(r'/contrib/(\d+)', link)
             if match:
                 return match.group(1)
-        
+
         # Fallback: generate ID from name and date
         name = review.get('name', 'unknown')
         date = review.get('date', 'unknown')
         return f"{name}_{date}".replace(' ', '_').replace('/', '_')
 
-    
+    def _run_tool_calls(self, tool_calls, messages: List[Dict[str, Any]], review_id: str) -> None:
+        """Execute every tool call the model requested and append each result
+        back into the message list as a 'tool' role message, so the next
+        model turn can see the outcome. Mirrors the standard OpenAI
+        function-calling round-trip.
+        """
+        for call in tool_calls:
+            fn_name = call.function.name
+            try:
+                args = json.loads(call.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+
+            dispatch = TOOL_DISPATCH.get(fn_name)
+            if dispatch is None:
+                result = {"status": "error", "message": f"unknown tool {fn_name}"}
+            else:
+                try:
+                    result = dispatch(args)
+                except Exception as e:
+                    import logging
+                    logging.error(
+                        "[tomo-id-073] Tool execution failed",
+                        extra={
+                            "operation": "_run_tool_calls",
+                            "tool_name": fn_name,
+                            "review_id": review_id,
+                            "error_type": type(e).__name__,
+                            "action": "Check tool arguments and downstream dependency health.",
+                        },
+                    )
+                    result = {"status": "error", "message": str(e)}
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": json.dumps(result, ensure_ascii=False),
+            })
+
     def analyze_single_review(self, review: Dict[str, Any], retry_count: int = 2) -> Dict[str, Any]:
         """Analyze sentiment for a single review with retry logic"""
-        
+
         # Tomosu AI Recommendation: Validated and capped review text before prompting to reduce PHI exposure and prompt-injection blast radius.
         review_text = str(review.get('text', '') or '')
         max_prompt_chars = int(os.getenv('MAX_REVIEW_PROMPT_CHARS', '4000'))
@@ -95,14 +230,18 @@ class ReviewSentimentAnalyzer:
         except (TypeError, ValueError):
             rating = 0
         rating = max(0, min(rating, 5))
-        
+
         # Check if the text appears to be in Arabic
-        has_arabic = bool(re.search(r'[\u0600-\u06FF]', prompt_review_text))
-        
+        has_arabic = bool(re.search(r'[؀-ۿ]', prompt_review_text))
+        review_id = self._extract_review_id(review)
+        author_name = review.get('name', '')
+
         prompt = f"""
 Analyze this review using both the review text and rating to provide comprehensive sentiment analysis:
 
 **Input:**
+- Review ID: "{review_id}"
+- Author: "{author_name}"
 - Review Text: "{prompt_review_text}"
 - Rating: {rating}/5
 - Language: {"Arabic" if has_arabic else "English/Other"}
@@ -131,9 +270,17 @@ Analyze this review using both the review text and rating to provide comprehensi
    - **Operations**: Scheduling, billing, administrative processes
    - **Trust & Safety**: Safety protocols, privacy, reliability
 
-RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
+5. **Tool Use:**
+   - If this review describes a patient-safety, clinical-risk, or trust-and-safety
+     issue (severity 4-5), call flag_critical_review with the review_id, severity,
+     and a one-sentence reason BEFORE returning your final JSON analysis.
+   - If useful to judge whether this is a recurring issue, call
+     lookup_review_history with the author name.
+   - Only use tools when they materially help the analysis — most reviews need no tool call.
+
+RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT (after any tool calls are resolved):
 {{
-  "text": Actual Text you reviewd,  
+  "text": Actual Text you reviewd,
   "sentiment": "positive/negative/neutral/doubtful",
   "confidence": 0.0,
   "sentiment_score": 0.0,
@@ -158,6 +305,14 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
 - For Arabic text, ensure analysis captures cultural context
 """
 
+        messages = [
+            {
+                "role": "system",
+                "content": "You are an expert sentiment analyst fluent in both Arabic and English. Use tools when a review needs escalation or history lookup, then respond with ONLY valid JSON. No explanatory text before or after the final JSON.",
+            },
+            {"role": "user", "content": prompt},
+        ]
+
         for attempt in range(retry_count + 1):
             try:
                 # Tomosu AI Recommendation: Added jittered exponential backoff logging to avoid synchronized retry storms against OpenAI.
@@ -176,41 +331,54 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                         }
                     )
                     time.sleep(wait_time)
-                
-                response = self.client.chat.completions.create(
-                    model="gpt-4",
-                    messages=[
-                        {
-                            "role": "system", 
-                            "content": "You are an expert sentiment analyst fluent in both Arabic and English. Respond with ONLY valid JSON. No explanatory text before or after the JSON."
+
+                # Tomosu AI Recommendation: Added a bounded tool-call loop (max 3
+                # rounds) so the model can escalate/lookup before finalizing,
+                # without risking an unbounded back-and-forth on a malformed tool
+                # response.
+                final_message = None
+                for tool_round in range(3):
+                    response = self.client.chat.completions.create(
+                        model="gpt-4",
+                        messages=messages,
+                        tools=TOOLS,
+                        tool_choice="auto",
+                        temperature=0.3,
+                        max_tokens=1000,
+                    )
+                    message = response.choices[0].message
+                    messages.append(message)
+
+                    if not message.tool_calls:
+                        final_message = message
+                        break
+
+                    self._run_tool_calls(message.tool_calls, messages, review_id)
+                else:
+                    import logging
+                    logging.warning(
+                        "[tomo-id-074] Review analysis tool-call loop hit round limit",
+                        extra={
+                            "operation": "analyze_single_review",
+                            "review_id": review_id,
+                            "action": "Model kept requesting tools without finalizing; review prompt/tool contracts.",
                         },
-                        {
-                            "role": "user", 
-                            "content": prompt
-                        }
-                    ],
-                    temperature=0.3,
-                    max_tokens=1000
-                )
-                
-                # Get raw response
-                raw_response = response.choices[0].message.content
+                    )
+
+                raw_response = final_message.content if final_message else None
                 if not raw_response:
                     raise ValueError("Empty response from OpenAI")
-                
+
                 # Clean and parse the JSON response
                 cleaned_response = self._clean_openai_response(raw_response)
                 analysis_result = json.loads(cleaned_response)
-                
+
                 # Validate required fields
                 required_fields = ['sentiment', 'confidence', 'sentiment_score', 'dimensions', 'key_themes', 'severity', 'summary']
                 for field in required_fields:
                     if field not in analysis_result:
                         analysis_result[field] = [] if field in ['dimensions', 'key_themes'] else 0 if field in ['confidence', 'sentiment_score', 'severity'] else 'unknown'
-                
-                # Extract review ID
-                review_id = self._extract_review_id(review)
-                
+
                 # Add original review data to the result in the expected format
                 result = {
                     "review_id": review_id,
@@ -222,9 +390,9 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                     "analysis": analysis_result,
                     "processed_at": datetime.now().isoformat()
                 }
-                
+
                 return result
-                
+
             except json.JSONDecodeError as e:
                 # Tomosu AI Recommendation: Added structured parse-failure context so malformed LLM responses are diagnosable without exposing full review text.
                 error_msg = f"JSON parsing error during OpenAI review analysis attempt {attempt + 1}: {e}"
@@ -235,7 +403,7 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                         "operation": "analyze_single_review",
                         "attempt": attempt + 1,
                         "max_attempts": retry_count + 1,
-                        "review_id": self._extract_review_id(review),
+                        "review_id": review_id,
                         "error_type": type(e).__name__,
                         "action": "Inspect model output contract and retry with stricter JSON instructions."
                     }
@@ -252,7 +420,7 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                         "operation": "analyze_single_review",
                         "attempt": attempt + 1,
                         "max_attempts": retry_count + 1,
-                        "review_id": self._extract_review_id(review),
+                        "review_id": review_id,
                         "error_type": type(e).__name__,
                         "action": "Check OpenAI service health, API key validity, and request timeout settings."
                     }
@@ -260,11 +428,11 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                 if attempt < retry_count:
                     continue
                 return self._create_fallback_analysis(review, error_msg)
-    
+
     def _create_fallback_analysis(self, review: Dict[str, Any], error_msg: str) -> Dict[str, Any]:
         """Create a fallback analysis when API call fails"""
         rating = review.get('rating', 0)
-        
+
         # Simple rating-based sentiment
         if rating >= 4:
             sentiment = "positive"
@@ -275,9 +443,9 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
         else:
             sentiment = "neutral"
             sentiment_score = 0.0
-        
+
         review_id = self._extract_review_id(review)
-        
+
         return {
             "review_id": review_id,
             "author": review.get('name', ''),
@@ -297,18 +465,18 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
             "processed_at": datetime.now().isoformat(),
             "error": error_msg
         }
-    
+
     def generate_sentiment_summaries(self, analyzed_reviews: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Generate AI-powered summaries for positive and negative reviews"""
-        
+
         print("Generating sentiment summaries...")
-        
+
         summaries = {}
-        
+
         # Process positive and negative reviews
         for sentiment_type in ['positive', 'negative']:
             filtered_reviews = [r for r in analyzed_reviews if r.get('analysis', {}).get('sentiment') == sentiment_type]
-            
+
             if not filtered_reviews:
                 summaries[sentiment_type] = {
                     "summary": f"No {sentiment_type} reviews found.",
@@ -316,31 +484,31 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                     "recommendations": []
                 }
                 continue
-            
+
             # Prepare data for summary generation
             dimensions_data = {}
             all_key_points = []
-            
+
             for review in filtered_reviews:
                 analysis = review.get('analysis', {})
                 dimensions = analysis.get('dimensions', [])
-                
+
                 for dim in dimensions:
                     dim_name = dim.get('name', 'Unknown')
                     dim_sentiment = dim.get('sentiment', sentiment_type)
                     key_points = dim.get('key_points', [])
-                    
+
                     if dim_name not in dimensions_data:
                         dimensions_data[dim_name] = {
                             'count': 0,
                             'key_points': [],
                             'sentiment': dim_sentiment
                         }
-                    
+
                     dimensions_data[dim_name]['count'] += 1
                     dimensions_data[dim_name]['key_points'].extend(key_points)
                     all_key_points.extend(key_points)
-            
+
             # Create summary prompt
             summary_prompt = f"""
 Based on the following {sentiment_type} review analysis, generate a comprehensive summary:
@@ -370,7 +538,7 @@ Generate a summary in the following JSON format:
   ],
   "recommendations": [
     "Recommendation 1",
-    "Recommendation 2", 
+    "Recommendation 2",
     "Recommendation 3",
     "Recommendation 4",
     "Recommendation 5",
@@ -389,7 +557,7 @@ Generate a summary in the following JSON format:
 - Base recommendations on the most frequent issues/strengths
 - Consider both Arabic and English review contexts
 """
-            
+
             try:
                 response = self.client.chat.completions.create(
                     model="gpt-4",
@@ -406,13 +574,13 @@ Generate a summary in the following JSON format:
                     temperature=0.3,
                     max_tokens=800
                 )
-                
+
                 raw_response = response.choices[0].message.content
                 cleaned_response = self._clean_openai_response(raw_response)
                 summary_result = json.loads(cleaned_response)
-                
+
                 summaries[sentiment_type] = summary_result
-                
+
             except Exception as e:
                 print(f"Error generating {sentiment_type} summary: {e}")
                 summaries[sentiment_type] = {
@@ -420,32 +588,32 @@ Generate a summary in the following JSON format:
                     "key_insights": [f"Analysis failed for {len(filtered_reviews)} {sentiment_type} reviews"],
                     "recommendations": ["Manual review recommended due to analysis failure"]
                 }
-        
+
         return summaries
 
     def generate_dimension_summaries(self, analyzed_reviews: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Generate AI-powered dimension-wise summaries for positive and negative sentiments"""
-        
+
         print("Generating dimension-wise summaries...")
-        
+
         dimension_summaries = {}
-        
+
         for dimension in self.analysis_dimensions:
             dimension_summaries[dimension] = {}
-            
+
             for sentiment_type in ['positive', 'negative']:
                 key_points = []
                 review_count = 0
-                
+
                 for review in analyzed_reviews:
                     analysis = review.get('analysis', {})
                     dimensions = analysis.get('dimensions', [])
-                    
+
                     for dim in dimensions:
                         if dim.get('name') == dimension and dim.get('sentiment') == sentiment_type:
                             key_points.extend(dim.get('key_points', []))
                             review_count += 1  # Count unique reviews mentioning this
-                
+
                 if review_count == 0:
                     dimension_summaries[dimension][sentiment_type] = {
                         "review_count": 0,
@@ -454,7 +622,7 @@ Generate a summary in the following JSON format:
                         "recommendations": []
                     }
                     continue
-                
+
                 # Create summary prompt
                 summary_prompt = f"""
 Based on the following {sentiment_type} mentions in the {dimension} dimension:
@@ -481,7 +649,7 @@ Generate a summary in the following JSON format:
   ],
   "recommendations": [
     "Recommendation 1",
-    "Recommendation 2", 
+    "Recommendation 2",
     "Recommendation 3",
     "Recommendation 4",
     "Recommendation 5",
@@ -501,7 +669,7 @@ Generate a summary in the following JSON format:
 - Consider both Arabic and English review contexts
 - Limit to 5-10 insights and recommendations
 """
-                
+
                 try:
                     response = self.client.chat.completions.create(
                         model="gpt-4",
@@ -518,14 +686,14 @@ Generate a summary in the following JSON format:
                         temperature=0.3,
                         max_tokens=800
                     )
-                    
+
                     raw_response = response.choices[0].message.content
                     cleaned_response = self._clean_openai_response(raw_response)
                     summary_result = json.loads(cleaned_response)
-                    
+
                     summary_result["review_count"] = review_count
                     dimension_summaries[dimension][sentiment_type] = summary_result
-                    
+
                 except Exception as e:
                     print(f"Error generating {sentiment_type} summary for {dimension}: {e}")
                     dimension_summaries[dimension][sentiment_type] = {
@@ -534,13 +702,13 @@ Generate a summary in the following JSON format:
                         "key_insights": [f"Analysis failed for {review_count} {sentiment_type} mentions in {dimension}"],
                         "recommendations": ["Manual review recommended due to analysis failure"]
                     }
-        
+
         return dimension_summaries
-    
-    def batch_analyze_reviews(self, reviews: List[Dict[str, Any]], 
+
+    def batch_analyze_reviews(self, reviews: List[Dict[str, Any]],
                             rate_limit_delay: float = 1.0) -> Dict[str, Any]:
         """Analyze multiple reviews and generate comprehensive report"""
-        
+
         # Tomosu AI Recommendation: Added batch-size guardrail to prevent unbounded review jobs from exhausting OpenAI quota or memory.
         max_batch_reviews = int(os.getenv('MAX_BATCH_REVIEWS', '5000'))
         if len(reviews) > max_batch_reviews:
@@ -548,34 +716,34 @@ Generate a summary in the following JSON format:
                 f"Review batch too large for sentiment analysis: {len(reviews)} reviews exceeds limit {max_batch_reviews}. "
                 "Action: split the input file into smaller batches or increase MAX_BATCH_REVIEWS after capacity review."
             )
-        
+
         print(f"Starting analysis of {len(reviews)} reviews...")
-        
+
         analyzed_reviews = []
         failed_count = 0
-        
+
         for i, review in enumerate(reviews):
             print(f"Processing review {i+1}/{len(reviews)}")
-            
+
             result = self.analyze_single_review(review)
             analyzed_reviews.append(result)
-            
+
             if 'error' in result:
                 failed_count += 1
-            
+
             # Rate limiting to avoid API limits
             if i < len(reviews) - 1:  # Don't sleep after last review
                 time.sleep(rate_limit_delay)
-        
+
         # Generate summary statistics
         summary_stats = self._generate_summary_stats(analyzed_reviews)
-        
+
         # Generate AI-powered sentiment summaries
         sentiment_summaries = self.generate_sentiment_summaries(analyzed_reviews)
-        
+
         # Generate AI-powered dimension summaries
         dimension_summaries = self.generate_dimension_summaries(analyzed_reviews)
-        
+
         # Create final output structure
         output = {
             "metadata": {
@@ -590,16 +758,16 @@ Generate a summary in the following JSON format:
             "dimension_summaries": dimension_summaries,
             "analyzed_reviews": analyzed_reviews
         }
-        
+
         return output
-    
+
     def _generate_summary_stats(self, analyzed_reviews: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Generate summary statistics from analyzed reviews"""
-        
+
         total_reviews = len(analyzed_reviews)
         if total_reviews == 0:
             return {}
-        
+
         # Count sentiment distribution
         sentiment_counts = {"positive": 0, "negative": 0, "neutral": 0, "doubtful": 0}
         sentiment_scores = []
@@ -607,54 +775,54 @@ Generate a summary in the following JSON format:
         dimension_mentions = {}
         severity_scores = []
         rating_distribution = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
-        
+
         for review in analyzed_reviews:
             analysis = review.get('analysis', {})
-            
+
             # Sentiment distribution
             sentiment = analysis.get('sentiment', 'neutral')
             sentiment_counts[sentiment] = sentiment_counts.get(sentiment, 0) + 1
-            
+
             # Sentiment scores
             if 'sentiment_score' in analysis:
                 sentiment_scores.append(analysis['sentiment_score'])
-            
+
             # Themes
             themes = analysis.get('key_themes', [])
             all_themes.extend(themes)
-            
+
             # Dimensions
             dimensions = analysis.get('dimensions', [])
             for dim in dimensions:
                 dim_name = dim.get('name', '')
                 if dim_name:
                     dimension_mentions[dim_name] = dimension_mentions.get(dim_name, 0) + 1
-            
+
             # Severity (for negative reviews)
             if sentiment == 'negative' and 'severity' in analysis:
                 severity_scores.append(analysis['severity'])
-            
+
             # Rating distribution
             rating = review.get('rating', 0)
             if 1 <= rating <= 5:
                 rating_distribution[rating] += 1
-        
+
         # Calculate percentages
         sentiment_percentages = {
-            k: round((v / total_reviews) * 100, 2) 
+            k: round((v / total_reviews) * 100, 2)
             for k, v in sentiment_counts.items()
         }
-        
+
         # Most common themes
         theme_counts = {}
         for theme in all_themes:
             theme_counts[theme] = theme_counts.get(theme, 0) + 1
-        
+
         top_themes = sorted(theme_counts.items(), key=lambda x: x[1], reverse=True)[:10]
-        
+
         # Most mentioned dimensions
         top_dimensions = sorted(dimension_mentions.items(), key=lambda x: x[1], reverse=True)[:5]
-        
+
         return {
             "sentiment_distribution": {
                 "counts": sentiment_counts,
@@ -674,7 +842,7 @@ def load_reviews_from_file(file_path: str) -> List[Dict[str, Any]]:
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        
+
         # Handle the new JSON structure
         if isinstance(data, dict) and 'reviews' in data:
             # New format: {"metadata": {...}, "reviews": [...]}
@@ -693,7 +861,7 @@ def load_reviews_from_file(file_path: str) -> List[Dict[str, Any]]:
             return [data]
         else:
             raise ValueError("Invalid JSON structure")
-            
+
     except FileNotFoundError:
         raise FileNotFoundError(f"File not found: {file_path}")
     except json.JSONDecodeError:
@@ -708,40 +876,40 @@ def save_analysis_results(results: Dict[str, Any], output_path: str):
 def main():
     parser = argparse.ArgumentParser(description='Analyze sentiment of reviews using OpenAI API')
     parser.add_argument('input_file', help='Path to input JSON file containing reviews')
-    parser.add_argument('-o', '--output', help='Output file path (default: analysis_results.json)', 
+    parser.add_argument('-o', '--output', help='Output file path (default: analysis_results.json)',
                        default='analysis_results.json')
     parser.add_argument('-k', '--api-key', help='OpenAI API key (or set OPENAI_API_KEY env var)')
-    parser.add_argument('-d', '--delay', type=float, default=1.0, 
+    parser.add_argument('-d', '--delay', type=float, default=1.0,
                        help='Delay between API calls in seconds (default: 1.0)')
-    
+
     args = parser.parse_args()
-    
+
     # Get API key
     api_key = args.api_key or os.getenv('OPENAI_API_KEY')
     if not api_key:
         print("Error: OpenAI API key is required. Set OPENAI_API_KEY environment variable or use -k flag.")
         return
-    
+
     try:
         # Load reviews
         print(f"Loading reviews from: {args.input_file}")
         reviews = load_reviews_from_file(args.input_file)
         print(f"Loaded {len(reviews)} reviews")
-        
+
         # Initialize analyzer
         analyzer = ReviewSentimentAnalyzer(api_key)
-        
+
         # Analyze reviews
         results = analyzer.batch_analyze_reviews(reviews, rate_limit_delay=args.delay)
-        
+
         # Save results
         save_analysis_results(results, args.output)
-        
+
         # Print summary
         stats = results['summary_statistics']
         summaries = results.get('sentiment_summaries', {})
         dimension_summaries = results.get('dimension_summaries', {})
-        
+
         print("\n" + "="*50)
         print("ANALYSIS SUMMARY")
         print("="*50)
@@ -750,15 +918,15 @@ def main():
         print(f"Failed Analyses: {results['metadata']['failed_analyses']}")
         print(f"Average Rating: {stats.get('average_rating', 0)}/5")
         print(f"Average Sentiment Score: {stats.get('average_sentiment_score', 0)}")
-        
+
         print("\nSentiment Distribution:")
         for sentiment, percentage in stats.get('sentiment_distribution', {}).get('percentages', {}).items():
             print(f"  {sentiment.title()}: {percentage}%")
-        
+
         print(f"\nTop Themes:")
         for theme, count in stats.get('top_themes', [])[:5]:
             print(f"  {theme}: {count} mentions")
-        
+
         # Print AI-generated overall summaries
         if summaries:
             print(f"\nOVERALL SENTIMENT INSIGHTS:")
@@ -768,7 +936,7 @@ def main():
                 print(f"  Key Insights:")
                 for insight in summary_data.get('key_insights', [])[:3]:  # Show first 3 insights
                     print(f"    • {insight}")
-        
+
         # Print dimension-wise summaries
         if dimension_summaries:
             print(f"\nDIMENSION-WISE INSIGHTS:")
@@ -784,9 +952,9 @@ def main():
                             insights = data.get('key_insights', [])
                             if insights:
                                 print(f"    Top Insight: {insights[0]}")
-        
+
         print(f"\nResults saved to: {args.output}")
-        
+
     except Exception as e:
         print(f"Error: {e}")
 
