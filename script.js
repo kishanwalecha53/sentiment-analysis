@@ -54,14 +54,34 @@ function clearExpiredCache() {
 // Clear expired cache on page load
 clearExpiredCache();
 
+// Tomosu AI Recommendation: Added fail-fast timeout and contextual error handling for dashboard data loading
 // Load data
-fetch('./analysis_results.json')
-  .then(r => r.json())
+const initialDataController = new AbortController();
+const initialDataTimeoutId = setTimeout(() => initialDataController.abort(), 10000);
+
+fetch('./analysis_results.json', { signal: initialDataController.signal })
+  .then(r => {
+    if (!r.ok) {
+      throw new Error(`Dashboard data load failed with HTTP ${r.status}`);
+    }
+    return r.json();
+  })
   .then(json => { 
+    clearTimeout(initialDataTimeoutId);
     rawData = json; 
     originalDimensionSummaries = json.dimension_summaries;
     initFromData(json); 
     initializeFilters();
+  })
+  .catch(error => {
+    clearTimeout(initialDataTimeoutId);
+    console.error('[tomo-id-064] Dashboard data initialization failed', {
+      operation: 'load_analysis_results',
+      errorName: error.name,
+      errorMessage: error.message,
+      action: 'Verify analysis_results.json is reachable and valid JSON'
+    });
+    alert('Unable to load analysis results. Reference: tomo-id-064');
   });
 
 function initFromData(data) {
@@ -351,9 +371,18 @@ async function applyDateFilter(startDate, endDate) {
     renderDimensionButtons();
     refreshInsights();
     
+  // Tomosu AI Recommendation: Added support reference and structured context for filter failures
   } catch (error) {
-    console.error('Filter error:', error);
-    alert(`Error applying filter: ${error.message}`);
+    const referenceId = 'tomo-id-065';
+    console.error(`[${referenceId}] Date filter application failed`, {
+      operation: 'apply_date_filter',
+      startDate,
+      endDate,
+      errorName: error.name,
+      errorMessage: error.message,
+      action: 'Check backend summary generation health and retry the filter'
+    });
+    alert(`Error applying filter. Reference: ${referenceId}`);
   } finally {
     // Keep loader visible for at least 600ms to avoid flashing
     const elapsed = Date.now() - (typeof loaderShownAt !== 'undefined' ? loaderShownAt : Date.now());
@@ -571,15 +600,18 @@ function refreshInsights() {
           <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px;">
       `;
 
+      // Tomosu AI Recommendation: Escaped review image URLs to prevent client-side injection from external review media
       images.forEach((imageUrl, index) => {
+        const safeImageUrl = escapeHtml(String(imageUrl || ''));
+        const encodedModalImageUrl = encodeURIComponent(String(imageUrl || ''));
         reviewContent += `
           <div style="position: relative; cursor: pointer;">
-            <img src="${imageUrl}" 
+            <img src="${safeImageUrl}" 
                  style="width: 80px; height: 80px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;" 
                  alt="Review image ${index + 1}"
                  onmouseover="this.style.transform='scale(1.05)'"
                  onmouseout="this.style.transform='scale(1)'"
-                 onclick="showImageModal('${imageUrl}')"
+                 onclick="showImageModal(decodeURIComponent('${encodedModalImageUrl}'))"
                  onerror="this.parentElement.innerHTML='<div style=\\'width: 80px; height: 80px; background: #f3f4f6; border: 1px solid #e2e8f0; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #9ca3af;\\'>Image unavailable</div>'">
           </div>
         `;
