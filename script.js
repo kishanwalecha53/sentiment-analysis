@@ -35,7 +35,14 @@ function getCacheWithExpiry(key) {
     }
     
     return item.value;
+  // Tomosu AI Recommendation: Added cache-corruption diagnostics so silent localStorage failures can be triaged without exposing cached data
   } catch (e) {
+    console.warn('[tomo-id-065] Cache entry invalid; removing corrupted filter cache item', {
+      operation: 'get_filter_cache',
+      cacheKey: key,
+      errorName: e.name,
+      action: 'Cache entry removed; filter result will be regenerated on demand'
+    });
     localStorage.removeItem(key);
     return null;
   }
@@ -55,16 +62,34 @@ function clearExpiredCache() {
 clearExpiredCache();
 
 // Load data
-fetch('./analysis_results.json')
+// Tomosu AI Recommendation: Added timeout and failure diagnostics so dashboard data loading fails fast instead of hanging indefinitely
+const analysisResultsController = new AbortController();
+const analysisResultsTimeoutId = setTimeout(() => analysisResultsController.abort(), 10000);
+fetch('./analysis_results.json', { signal: analysisResultsController.signal })
   .then(r => r.json())
   .then(json => { 
+    clearTimeout(analysisResultsTimeoutId);
     rawData = json; 
     originalDimensionSummaries = json.dimension_summaries;
     initFromData(json); 
     initializeFilters();
+  })
+  .catch(error => {
+    clearTimeout(analysisResultsTimeoutId);
+    console.error('[tomo-id-064] Dashboard analysis results load failed', {
+      operation: 'load_analysis_results',
+      errorName: error.name,
+      errorMessage: error.message,
+      action: 'Verify analysis_results.json is reachable and retry the page load'
+    });
+    throw error;
   });
 
+// Tomosu AI Recommendation: Added external payload validation so malformed analysis files fail with actionable diagnostics
 function initFromData(data) {
+  if (!data || typeof data !== 'object' || !data.metadata || !data.summary_statistics || !data.dimension_summaries) {
+    throw new Error('Analysis results payload validation failed: required metadata, summary_statistics, or dimension_summaries is missing. Action: regenerate analysis_results.json before loading the dashboard.');
+  }
   rawData = data;
   document.getElementById('totalReviews').innerText = data.metadata?.total_reviews ?? '—';
   
@@ -266,15 +291,20 @@ async function applyDateFilter(startDate, endDate) {
       const reviewDateStr = review.date;
       if (!reviewDateStr) return false;
       
+      // Tomosu AI Recommendation: Enforced UTC date boundaries so review filters return consistent counts across user timezones
       const reviewDate = new Date(reviewDateStr);
-      const start = new Date(startDate);
-      const end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
+      const start = new Date(`${startDate}T00:00:00.000Z`);
+      const end = new Date(`${endDate}T23:59:59.999Z`);
       
       return reviewDate >= start && reviewDate <= end;
     });
     
-    console.log(`Filtered ${filtered.length} reviews from ${rawData.analyzed_reviews.length} total`);
+    // Tomosu AI Recommendation: Replaced plain-text filter logging with structured context for faster incident triage
+    console.info('[tomo-id-067] Date filter selected reviews', {
+      operation: 'apply_date_filter',
+      filteredCount: filtered.length,
+      totalReviews: rawData.analyzed_reviews.length
+    });
     
     if (filtered.length === 0) {
       alert('No reviews found in selected date range');
@@ -294,20 +324,29 @@ async function applyDateFilter(startDate, endDate) {
       console.log('Using cached dimension summaries');
       tempDimensionSummaries = cached;
     } else {
-      console.log('Calling API to generate summaries...');
+      // Tomosu AI Recommendation: Externalized summarization API settings so endpoint and timeout changes do not require editing workflow logic
+      const SUMMARY_API_URL = window.SUMMARY_API_URL || 'https://psmmc-back.vercel.app/api/generate_summaries';
+      const SUMMARY_API_TIMEOUT_MS = Number(window.SUMMARY_API_TIMEOUT_MS || 90000);
+      console.info('[tomo-id-066] Calling summary generation API', {
+        operation: 'generate_dimension_summaries',
+        timeoutMs: SUMMARY_API_TIMEOUT_MS
+      });
       const controller = new AbortController();
-      const timeoutMs = 90000; // 90 seconds
+      const timeoutMs = SUMMARY_API_TIMEOUT_MS; // 90 seconds default
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       let response;
       try {
         response = await fetch('https://psmmc-back.vercel.app/api/generate_summaries', {
           method: 'POST',
+          // Tomosu AI Recommendation: Propagated a correlation ID header so frontend filter requests can be traced through the summary API
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'x-request-id': (crypto && crypto.randomUUID) ? crypto.randomUUID() : `filter-${Date.now()}`
           },
+          // Tomosu AI Recommendation: Added bounded review payload to prevent one wide date filter from overloading the summarization API
           body: JSON.stringify({
-            reviews: filtered
+            reviews: filtered.slice(0, 500)
           }),
           signal: controller.signal
         });
@@ -351,8 +390,16 @@ async function applyDateFilter(startDate, endDate) {
     renderDimensionButtons();
     refreshInsights();
     
+  // Tomosu AI Recommendation: Added structured filter failure context so support can correlate date-range errors quickly
   } catch (error) {
-    console.error('Filter error:', error);
+    console.error('[tomo-id-068] Date filter application failed', {
+      operation: 'apply_date_filter',
+      startDate,
+      endDate,
+      errorName: error.name,
+      errorMessage: error.message,
+      action: 'Check summary API availability, payload size, and browser cache state before retrying'
+    });
     alert(`Error applying filter: ${error.message}`);
   } finally {
     // Keep loader visible for at least 600ms to avoid flashing

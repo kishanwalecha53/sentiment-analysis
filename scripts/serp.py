@@ -27,9 +27,15 @@ def save_data_to_json(data, filename_prefix="reviews_data"):
         print(f"Error saving to file {filename}: {e}")
         return None
 
+# Tomosu AI Recommendation: Externalized SerpApi credentials to prevent hardcoded secrets and unsafe key rotation incidents
 def extract_reviews():
+    import os
+    serp_api_key = os.getenv("SERPAPI_API_KEY")
+    if not serp_api_key:
+        raise RuntimeError("SerpApi extraction failed: SERPAPI_API_KEY is not configured. Action: set the environment variable from your secret manager before running extraction.")
+
     params = {
-        "api_key": "your_serp_api_key",
+        "api_key": serp_api_key,
         "engine": "google_maps_reviews",
         "hl": "ar",
         "data_id": "0x3e2f039b4cec3f29:0x28429402fbebe3"

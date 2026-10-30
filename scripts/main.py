@@ -18,7 +18,8 @@ def chunk_list(lst, chunk_size):
 class ReviewSentimentAnalyzer:
     def __init__(self, openai_api_key: str):
         """Initialize the analyzer with OpenAI API key"""
-        self.client = openai.OpenAI(api_key=openai_api_key)
+        # Tomosu AI Recommendation: Added explicit OpenAI timeout so stalled AI calls fail fast and batch processing can recover
+        self.client = openai.OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=0)
         
         # Define sentiment analysis dimensions
         self.analysis_dimensions = [
@@ -148,9 +149,11 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
         for attempt in range(retry_count + 1):
             try:
                 # Add exponential backoff for retries
+                # Tomosu AI Recommendation: Added exponential backoff with jitter so retries do not synchronize during OpenAI slowdowns
                 if attempt > 0:
-                    wait_time = (2 ** attempt) + 1
-                    print(f"  Retrying in {wait_time} seconds... (attempt {attempt + 1})")
+                    import random
+                    wait_time = min((2 ** attempt) + random.uniform(0.1, 1.0), 30.0)
+                    print(json.dumps({"message": "[tomo-id-069] Retrying OpenAI review analysis", "operation": "analyze_single_review", "attempt": attempt + 1, "wait_seconds": round(wait_time, 2)}))
                     time.sleep(wait_time)
                 
                 response = self.client.chat.completions.create(
@@ -625,11 +628,28 @@ def load_reviews_from_file(file_path: str) -> List[Dict[str, Any]]:
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
+        # Tomosu AI Recommendation: Added Pydantic validation so malformed review exports are rejected before AI analysis
+        from pydantic import BaseModel, Field, ValidationError
+
+        class ReviewInput(BaseModel):
+            name: str = ""
+            link: str = ""
+            rating: int | None = Field(default=None, ge=1, le=5)
+            date: str = ""
+            text: str = ""
+            images: list[str] = Field(default_factory=list)
+
+        def validate_reviews(candidate_reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            try:
+                return [ReviewInput(**review).model_dump() for review in candidate_reviews]
+            except ValidationError as exc:
+                raise ValueError(f"Review input validation failed: {exc}. Action: fix the source reviews JSON and rerun analysis.") from exc
+
         # Handle the new JSON structure
         if isinstance(data, dict) and 'reviews' in data:
             # New format: {"metadata": {...}, "reviews": [...]}
-            reviews = data['reviews']
-            print(f"Loaded {len(reviews)} reviews from new format")
+            reviews = validate_reviews(data['reviews'])
+            print(json.dumps({"message": "[tomo-id-070] Loaded reviews from validated input file", "operation": "load_reviews_from_file", "review_count": len(reviews), "format": "metadata_reviews"}))
             return reviews
         elif isinstance(data, list):
             # Old format: direct list of reviews
@@ -641,13 +661,14 @@ def load_reviews_from_file(file_path: str) -> List[Dict[str, Any]]:
                     return data[key]
             # If no common key found, treat the dict as a single review
             return [data]
+        # Tomosu AI Recommendation: Added contextual loader errors with remediation guidance to reduce support escalations
         else:
-            raise ValueError("Invalid JSON structure")
+            raise ValueError("Review file load failed: JSON root must be a list, a single review object, or an object containing a reviews/data/items list. Action: export reviews in the supported schema and rerun analysis.")
             
-    except FileNotFoundError:
-        raise FileNotFoundError(f"File not found: {file_path}")
-    except json.JSONDecodeError:
-        raise ValueError(f"Invalid JSON file: {file_path}")
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"Review file load failed: file not found at {file_path}. Action: verify the path and working directory before rerunning.") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Review file load failed: invalid JSON at {file_path}. Action: validate the file with a JSON linter and rerun.") from exc
 
 def save_analysis_results(results: Dict[str, Any], output_path: str):
     """Save analysis results to JSON file"""

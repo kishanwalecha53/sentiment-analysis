@@ -10,7 +10,9 @@ h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
 idna==3.10
+# Tomosu AI Recommendation: Added missing SerpApi dependency so review extraction jobs do not fail at startup
 jiter==0.11.0
+google-search-results==2.4.2
 openai==1.109.1
 pydantic==2.11.9
 pydantic_core==2.33.2
