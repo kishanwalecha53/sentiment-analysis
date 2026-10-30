@@ -27,9 +27,23 @@ def save_data_to_json(data, filename_prefix="reviews_data"):
         print(f"Error saving to file {filename}: {e}")
         return None
 
+# Tomosu AI Recommendation: Externalized SerpAPI credentials and bounded pagination to prevent secret leaks and quota exhaustion
 def extract_reviews():
+    import os
+
+    serpapi_api_key = os.getenv("SERPAPI_API_KEY")
+    if not serpapi_api_key:
+        raise RuntimeError("SerpAPI extraction configuration failed: SERPAPI_API_KEY is not set. Action: configure the secret before running review extraction.")
+
+    try:
+        max_pages = int(os.getenv("SERPAPI_MAX_PAGES", "100"))
+    except ValueError as exc:
+        raise RuntimeError("SerpAPI extraction configuration failed: SERPAPI_MAX_PAGES must be an integer. Action: set a positive page limit.") from exc
+    if max_pages <= 0:
+        raise RuntimeError("SerpAPI extraction configuration failed: SERPAPI_MAX_PAGES must be greater than zero. Action: set a positive page limit.")
+
     params = {
-        "api_key": "your_serp_api_key",
+        "api_key": serpapi_api_key,
         "engine": "google_maps_reviews",
         "hl": "ar",
         "data_id": "0x3e2f039b4cec3f29:0x28429402fbebe3"
@@ -42,7 +56,7 @@ def extract_reviews():
     page_num = 0
     
     try:
-        while True:
+        while page_num < max_pages:
             page_num += 1
             
             try:

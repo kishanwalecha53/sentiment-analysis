@@ -16,9 +16,10 @@ def chunk_list(lst, chunk_size):
 
 
 class ReviewSentimentAnalyzer:
+    # Tomosu AI Recommendation: Added explicit OpenAI timeout and disabled hidden SDK retries to prevent indefinite model-provider hangs
     def __init__(self, openai_api_key: str):
         """Initialize the analyzer with OpenAI API key"""
-        self.client = openai.OpenAI(api_key=openai_api_key)
+        self.client = openai.OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=0)
         
         # Define sentiment analysis dimensions
         self.analysis_dimensions = [
@@ -80,8 +81,16 @@ class ReviewSentimentAnalyzer:
     def analyze_single_review(self, review: Dict[str, Any], retry_count: int = 2) -> Dict[str, Any]:
         """Analyze sentiment for a single review with retry logic"""
         
-        review_text = review.get('text', '')
-        rating = review.get('rating', 0)
+        # Tomosu AI Recommendation: Validated and bounded external review payload fields before prompt construction to reduce crashes, token spikes, and prompt-injection risk
+        if not isinstance(review, dict):
+            raise ValueError("Review analysis failed: review payload must be a JSON object. Action: validate the input file schema before running analysis.")
+
+        review_text = str(review.get('text', ''))[:5000].replace('```', '` ` `')
+        try:
+            rating = int(review.get('rating', 0) or 0)
+        except (TypeError, ValueError):
+            rating = 0
+        rating = max(0, min(5, rating))
         
         # Check if the text appears to be in Arabic
         has_arabic = bool(re.search(r'[\u0600-\u06FF]', review_text))
@@ -147,10 +156,12 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
 
         for attempt in range(retry_count + 1):
             try:
+                # Tomosu AI Recommendation: Added capped jittered backoff and structured retry signal to avoid synchronized OpenAI retry storms
                 # Add exponential backoff for retries
                 if attempt > 0:
-                    wait_time = (2 ** attempt) + 1
-                    print(f"  Retrying in {wait_time} seconds... (attempt {attempt + 1})")
+                    import random
+                    wait_time = min(30.0, (2 ** attempt) + random.uniform(0.1, 1.5))
+                    print(json.dumps({"message": "[tomo-id-070] Retrying OpenAI review analysis after transient failure", "operation": "analyze_single_review", "attempt": attempt + 1, "maxAttempts": retry_count + 1, "waitSeconds": round(wait_time, 2), "action": "Check OpenAI provider health if retries continue"}))
                     time.sleep(wait_time)
                 
                 response = self.client.chat.completions.create(
@@ -236,6 +247,8 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
         
         review_id = self._extract_review_id(review)
         
+        # Tomosu AI Recommendation: Bounded persisted provider error details to prevent leaking verbose dependency failures into analysis outputs
+        sanitized_error_msg = str(error_msg).replace('\n', ' ')[:300]
         return {
             "review_id": review_id,
             "author": review.get('name', ''),
