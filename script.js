@@ -10,14 +10,23 @@ const dimensions = ['Service Quality', 'Facility Experience', 'Trust & Safety', 
 // Cache management with expiration
 const CACHE_DURATION = 12 * 60 * 60 * 1000; // 12 hours in milliseconds
 
+// Tomosu AI Recommendation: Added localStorage entry size guard to prevent browser quota failures from large filtered summaries
 function setCacheWithExpiry(key, value) {
   const item = {
     value: value,
     expiry: Date.now() + CACHE_DURATION
   };
-  localStorage.setItem(key, JSON.stringify(item));
+  const serializedItem = JSON.stringify(item);
+  const maxCacheEntryChars = 2 * 1024 * 1024;
+  if (serializedItem.length > maxCacheEntryChars) {
+    console.warn(JSON.stringify({ message: '[tomo-id-066] Skipping oversized filter cache entry', operation: 'set_filter_cache', cacheKey: key, entryChars: serializedItem.length, maxCacheEntryChars, action: 'Reduce date range or server summary payload size' }));
+    return false;
+  }
+  localStorage.setItem(key, serializedItem);
+  return true;
 }
 
+// Tomosu AI Recommendation: Added structured cache corruption signal so silent localStorage failures do not hide expensive recomputation
 function getCacheWithExpiry(key) {
   const itemStr = localStorage.getItem(key);
   
@@ -36,6 +45,7 @@ function getCacheWithExpiry(key) {
     
     return item.value;
   } catch (e) {
+    console.warn(JSON.stringify({ message: '[tomo-id-067] Filter cache entry was unreadable and removed', operation: 'get_filter_cache', cacheKey: key, errorType: e?.name || 'Error', errorMessage: e?.message || String(e), action: 'Cache entry removed; regenerate summaries if needed' }));
     localStorage.removeItem(key);
     return null;
   }
@@ -54,15 +64,28 @@ function clearExpiredCache() {
 // Clear expired cache on page load
 clearExpiredCache();
 
+// Tomosu AI Recommendation: Added timeout, status validation, and reference logging so the dashboard fails fast when analysis data cannot load
 // Load data
-fetch('./analysis_results.json')
-  .then(r => r.json())
+const bootstrapController = new AbortController();
+const bootstrapTimeoutId = setTimeout(() => bootstrapController.abort(), 10000);
+fetch('./analysis_results.json', { signal: bootstrapController.signal })
+  .then(r => {
+    if (!r.ok) {
+      throw new Error(`Dashboard analysis data load failed with HTTP ${r.status}. Action: verify analysis_results.json deployment and CDN availability.`);
+    }
+    return r.json();
+  })
   .then(json => { 
     rawData = json; 
     originalDimensionSummaries = json.dimension_summaries;
     initFromData(json); 
     initializeFilters();
-  });
+  })
+  .catch(error => {
+    console.error(JSON.stringify({ message: '[tomo-id-065] Dashboard analysis data load failed', operation: 'load_analysis_results', errorType: error?.name || 'Error', errorMessage: error?.message || String(error), action: 'Verify analysis_results.json exists and is reachable by the browser' }));
+    alert('Unable to load analysis dashboard data. Reference: tomo-id-065');
+  })
+  .finally(() => clearTimeout(bootstrapTimeoutId));
 
 function initFromData(data) {
   rawData = data;
@@ -299,22 +322,32 @@ async function applyDateFilter(startDate, endDate) {
       const timeoutMs = 90000; // 90 seconds
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
+      // Tomosu AI Recommendation: Bounded summary payloads and added request correlation to prevent one filter request from overloading the summary API
+      const summaryApiUrl = window.PSMMC_CONFIG?.summaryApiUrl || 'https://psmmc-back.vercel.app/api/generate_summaries';
+      const maxReviewsPerSummaryRequest = 500;
+      const reviewsForSummary = filtered.slice(0, maxReviewsPerSummaryRequest);
+      const correlationId = `filter-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      if (filtered.length > reviewsForSummary.length) {
+        console.warn(JSON.stringify({ message: '[tomo-id-068] Filter summary payload truncated to protect backend capacity', operation: 'generate_filter_summaries', correlationId, requestedReviews: filtered.length, submittedReviews: reviewsForSummary.length, action: 'Narrow the date range for complete summaries' }));
+      }
+
       let response;
       try {
-        response = await fetch('https://psmmc-back.vercel.app/api/generate_summaries', {
+        response = await fetch(summaryApiUrl, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'x-request-id': correlationId
           },
           body: JSON.stringify({
-            reviews: filtered
+            reviews: reviewsForSummary
           }),
           signal: controller.signal
         });
       } catch (err) {
         clearTimeout(timeoutId);
         if (err && err.name === 'AbortError') {
-          throw new Error('Request timed out after 90 seconds');
+          throw new Error('Summary generation request timed out after 90 seconds. Action: retry with a narrower date range or check summary API health.');
         }
         throw err;
       }
@@ -351,9 +384,11 @@ async function applyDateFilter(startDate, endDate) {
     renderDimensionButtons();
     refreshInsights();
     
+  // Tomosu AI Recommendation: Added structured filter failure context and a user-facing reference ID for faster support triage
   } catch (error) {
-    console.error('Filter error:', error);
-    alert(`Error applying filter: ${error.message}`);
+    const filterErrorRef = 'tomo-id-069';
+    console.error(JSON.stringify({ message: `[${filterErrorRef}] Date filter application failed`, operation: 'apply_date_filter', startDate, endDate, errorType: error?.name || 'Error', errorMessage: error?.message || String(error), action: 'Check summary API status, payload size, and browser network errors' }));
+    alert(`Error applying filter. Reference: ${filterErrorRef}. ${error.message}`);
   } finally {
     // Keep loader visible for at least 600ms to avoid flashing
     const elapsed = Date.now() - (typeof loaderShownAt !== 'undefined' ? loaderShownAt : Date.now());
@@ -571,15 +606,21 @@ function refreshInsights() {
           <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px;">
       `;
 
+      // Tomosu AI Recommendation: Escaped external review image URLs to prevent malformed review content from corrupting dashboard markup
       images.forEach((imageUrl, index) => {
+        const normalizedImageUrl = String(imageUrl || '').trim();
+        const isAllowedImageUrl = /^https?:\/\//i.test(normalizedImageUrl);
+        const safeImageUrl = isAllowedImageUrl ? normalizedImageUrl : '';
+        const escapedImageUrl = escapeHtml(safeImageUrl);
+        const encodedModalImageUrl = encodeURIComponent(safeImageUrl);
         reviewContent += `
           <div style="position: relative; cursor: pointer;">
-            <img src="${imageUrl}" 
+            <img src="${escapedImageUrl}" 
                  style="width: 80px; height: 80px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;" 
                  alt="Review image ${index + 1}"
                  onmouseover="this.style.transform='scale(1.05)'"
                  onmouseout="this.style.transform='scale(1)'"
-                 onclick="showImageModal('${imageUrl}')"
+                 onclick="showImageModal(decodeURIComponent('${encodedModalImageUrl}'))"
                  onerror="this.parentElement.innerHTML='<div style=\\'width: 80px; height: 80px; background: #f3f4f6; border: 1px solid #e2e8f0; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #9ca3af;\\'>Image unavailable</div>'">
           </div>
         `;
