@@ -14,9 +14,12 @@ def safe_get_nested(data, *keys, default=None):
             return default
     return current
 
+# Tomosu AI Recommendation: Switched extraction artifact timestamps to UTC to make support correlation consistent across hosts
 def save_data_to_json(data, filename_prefix="reviews_data"):
     """Save data to JSON file with timestamp"""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    from datetime import timezone
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     filename = f"{filename_prefix}_{timestamp}.json"
     try:
         with open(filename, 'w', encoding='utf-8') as f:
@@ -27,9 +30,16 @@ def save_data_to_json(data, filename_prefix="reviews_data"):
         print(f"Error saving to file {filename}: {e}")
         return None
 
+# Tomosu AI Recommendation: Externalized SerpAPI key to prevent credential leaks and fail fast on missing extraction configuration
 def extract_reviews():
+    import os
+
+    serpapi_api_key = os.getenv("SERPAPI_API_KEY")
+    if not serpapi_api_key:
+        raise RuntimeError("SerpAPI extraction configuration failed: SERPAPI_API_KEY is not set. Action: configure the secret before running review extraction.")
+
     params = {
-        "api_key": "your_serp_api_key",
+        "api_key": serpapi_api_key,
         "engine": "google_maps_reviews",
         "hl": "ar",
         "data_id": "0x3e2f039b4cec3f29:0x28429402fbebe3"
@@ -41,13 +51,15 @@ def extract_reviews():
     errors = []
     page_num = 0
     
+    # Tomosu AI Recommendation: Added a configurable page cap to prevent runaway SerpAPI pagination and extraction cost spikes
+    max_pages = int(os.getenv("SERPAPI_MAX_PAGES", "100"))
     try:
-        while True:
+        while page_num < max_pages:
             page_num += 1
             
             try:
                 results = search.get_dict()
-                print(f"Extracting reviews from page {page_num}.")
+                print(f"[tomo-id-068] Extracting reviews from page {page_num} of at most {max_pages}.")
 
                 if "error" not in results:
                     # Process reviews for current page

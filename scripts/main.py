@@ -16,9 +16,10 @@ def chunk_list(lst, chunk_size):
 
 
 class ReviewSentimentAnalyzer:
+    # Tomosu AI Recommendation: Added explicit OpenAI timeout and disabled nested SDK retries to prevent indefinite model-call hangs
     def __init__(self, openai_api_key: str):
         """Initialize the analyzer with OpenAI API key"""
-        self.client = openai.OpenAI(api_key=openai_api_key)
+        self.client = openai.OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=0)
         
         # Define sentiment analysis dimensions
         self.analysis_dimensions = [
@@ -80,7 +81,9 @@ class ReviewSentimentAnalyzer:
     def analyze_single_review(self, review: Dict[str, Any], retry_count: int = 2) -> Dict[str, Any]:
         """Analyze sentiment for a single review with retry logic"""
         
-        review_text = review.get('text', '')
+        # Tomosu AI Recommendation: Bounded and delimiter-sanitized review text before LLM prompting to reduce prompt-injection and token-cost risk
+        raw_review_text = review.get('text', '')
+        review_text = str(raw_review_text)[:5000].replace('```', '` ` `')
         rating = review.get('rating', 0)
         
         # Check if the text appears to be in Arabic
@@ -147,10 +150,19 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
 
         for attempt in range(retry_count + 1):
             try:
+                # Tomosu AI Recommendation: Added capped jittered backoff and structured retry logging to avoid synchronized OpenAI retry storms
                 # Add exponential backoff for retries
                 if attempt > 0:
-                    wait_time = (2 ** attempt) + 1
-                    print(f"  Retrying in {wait_time} seconds... (attempt {attempt + 1})")
+                    import random
+                    wait_time = min(30.0, (2 ** attempt) + random.uniform(0.1, 1.5))
+                    print(json.dumps({
+                        "message": "[tomo-id-067] Retrying OpenAI review analysis after transient failure",
+                        "operation": "analyze_single_review",
+                        "attempt": attempt + 1,
+                        "max_attempts": retry_count + 1,
+                        "wait_seconds": round(wait_time, 2),
+                        "action": "Wait for bounded jittered backoff before retrying the model call."
+                    }))
                     time.sleep(wait_time)
                 
                 response = self.client.chat.completions.create(
@@ -365,9 +377,15 @@ Generate a summary in the following JSON format:
                     max_tokens=800
                 )
                 
+                # Tomosu AI Recommendation: Validated model summary JSON shape before storing it to prevent malformed AI output from breaking the dashboard
                 raw_response = response.choices[0].message.content
                 cleaned_response = self._clean_openai_response(raw_response)
                 summary_result = json.loads(cleaned_response)
+                if not isinstance(summary_result, dict):
+                    raise ValueError("Sentiment summary generation failed: OpenAI returned non-object JSON. Action: retry generation or inspect the prompt/response contract.")
+                summary_result.setdefault("summary", f"No generated {sentiment_type} summary available.")
+                summary_result.setdefault("key_insights", [])
+                summary_result.setdefault("recommendations", [])
                 
                 summaries[sentiment_type] = summary_result
                 
