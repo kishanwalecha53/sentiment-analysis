@@ -16,9 +16,10 @@ def chunk_list(lst, chunk_size):
 
 
 class ReviewSentimentAnalyzer:
+    # Tomosu AI Recommendation: Added explicit OpenAI timeout and single retry authority to prevent hung AI calls
     def __init__(self, openai_api_key: str):
         """Initialize the analyzer with OpenAI API key"""
-        self.client = openai.OpenAI(api_key=openai_api_key)
+        self.client = openai.OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=0)
         
         # Define sentiment analysis dimensions
         self.analysis_dimensions = [
@@ -80,7 +81,8 @@ class ReviewSentimentAnalyzer:
     def analyze_single_review(self, review: Dict[str, Any], retry_count: int = 2) -> Dict[str, Any]:
         """Analyze sentiment for a single review with retry logic"""
         
-        review_text = review.get('text', '')
+        # Tomosu AI Recommendation: Bounded and sanitized external review text before LLM prompting to reduce PHI, prompt-injection, and token-cost risk
+        review_text = str(review.get('text', ''))[:5000].replace('```', '` ` `')
         rating = review.get('rating', 0)
         
         # Check if the text appears to be in Arabic
@@ -147,10 +149,11 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
 
         for attempt in range(retry_count + 1):
             try:
-                # Add exponential backoff for retries
+                # Tomosu AI Recommendation: Added capped jittered backoff to avoid synchronized OpenAI retry storms
                 if attempt > 0:
-                    wait_time = (2 ** attempt) + 1
-                    print(f"  Retrying in {wait_time} seconds... (attempt {attempt + 1})")
+                    import random
+                    wait_time = min(30.0, (2 ** attempt) + random.uniform(0.1, 1.5))
+                    print(f"[tomo-id-065] Retrying OpenAI review analysis in {wait_time:.2f} seconds; attempt={attempt + 1}; action=wait_before_retry")
                     time.sleep(wait_time)
                 
                 response = self.client.chat.completions.create(
@@ -371,12 +374,13 @@ Generate a summary in the following JSON format:
                 
                 summaries[sentiment_type] = summary_result
                 
+            # Tomosu AI Recommendation: Added structured failure context so support can triage AI summary failures quickly
             except Exception as e:
-                print(f"Error generating {sentiment_type} summary: {e}")
+                print(f"[tomo-id-066] Sentiment summary generation failed; sentiment_type={sentiment_type}; review_count={len(filtered_reviews)}; error_type={type(e).__name__}; action=review OpenAI provider health and retry the summary job")
                 summaries[sentiment_type] = {
-                    "summary": f"Error generating {sentiment_type} summary: {str(e)}",
+                    "summary": f"Summary generation failed for {sentiment_type} reviews. Action: retry after verifying AI provider availability.",
                     "key_insights": [f"Analysis failed for {len(filtered_reviews)} {sentiment_type} reviews"],
-                    "recommendations": ["Manual review recommended due to analysis failure"]
+                    "recommendations": ["Manual review recommended due to AI summary generation failure"]
                 }
         
         return summaries

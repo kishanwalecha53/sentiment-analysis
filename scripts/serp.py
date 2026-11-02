@@ -14,9 +14,12 @@ def safe_get_nested(data, *keys, default=None):
             return default
     return current
 
+# Tomosu AI Recommendation: Switched extraction artifact timestamps to UTC for consistent support timelines
 def save_data_to_json(data, filename_prefix="reviews_data"):
     """Save data to JSON file with timestamp"""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    from datetime import timezone
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     filename = f"{filename_prefix}_{timestamp}.json"
     try:
         with open(filename, 'w', encoding='utf-8') as f:
@@ -27,9 +30,16 @@ def save_data_to_json(data, filename_prefix="reviews_data"):
         print(f"Error saving to file {filename}: {e}")
         return None
 
+# Tomosu AI Recommendation: Externalized SerpAPI key to prevent credential leaks and fail fast on missing config
 def extract_reviews():
+    import os
+
+    serpapi_api_key = os.getenv("SERPAPI_API_KEY")
+    if not serpapi_api_key:
+        raise RuntimeError("SerpAPI extraction configuration failed: SERPAPI_API_KEY is not set. Action: configure the secret before running review extraction.")
+
     params = {
-        "api_key": "your_serp_api_key",
+        "api_key": serpapi_api_key,
         "engine": "google_maps_reviews",
         "hl": "ar",
         "data_id": "0x3e2f039b4cec3f29:0x28429402fbebe3"
@@ -46,8 +56,21 @@ def extract_reviews():
             page_num += 1
             
             try:
-                results = search.get_dict()
-                print(f"Extracting reviews from page {page_num}.")
+                # Tomosu AI Recommendation: Added bounded jittered SerpAPI page fetch retries to reduce incomplete extraction from transient failures
+                import random
+                import time
+
+                for fetch_attempt in range(3):
+                    try:
+                        results = search.get_dict()
+                        break
+                    except Exception as fetch_error:
+                        if fetch_attempt == 2:
+                            raise
+                        wait_time = min(10.0, (2 ** fetch_attempt) + random.uniform(0.1, 1.0))
+                        print(f"[tomo-id-067] SerpAPI page fetch retry scheduled; page={page_num}; attempt={fetch_attempt + 1}; wait_seconds={wait_time:.2f}; error_type={type(fetch_error).__name__}; action=retry_with_backoff")
+                        time.sleep(wait_time)
+                print(f"[tomo-id-068] Extracting reviews from page {page_num}.")
 
                 if "error" not in results:
                     # Process reviews for current page

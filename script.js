@@ -54,15 +54,28 @@ function clearExpiredCache() {
 // Clear expired cache on page load
 clearExpiredCache();
 
+// Tomosu AI Recommendation: Added timeout and failure handling for dashboard data load to avoid silent blank-page failures
 // Load data
-fetch('./analysis_results.json')
-  .then(r => r.json())
+const initialDataController = new AbortController();
+const initialDataTimeoutId = setTimeout(() => initialDataController.abort(), 10000);
+fetch('./analysis_results.json', { signal: initialDataController.signal })
+  .then(r => {
+    if (!r.ok) {
+      throw new Error(`Dashboard data load failed with HTTP ${r.status}`);
+    }
+    return r.json();
+  })
   .then(json => { 
     rawData = json; 
     originalDimensionSummaries = json.dimension_summaries;
     initFromData(json); 
     initializeFilters();
-  });
+  })
+  .catch(error => {
+    console.error('[tomo-id-069] Dashboard data load failed', { operation: 'load_analysis_results', errorName: error.name, errorMessage: error.message, action: 'verify analysis_results.json is deployed and valid JSON' });
+    alert('Dashboard data could not be loaded. Reference: tomo-id-069. Please refresh or contact support.');
+  })
+  .finally(() => clearTimeout(initialDataTimeoutId));
 
 function initFromData(data) {
   rawData = data;
@@ -274,7 +287,15 @@ async function applyDateFilter(startDate, endDate) {
       return reviewDate >= start && reviewDate <= end;
     });
     
-    console.log(`Filtered ${filtered.length} reviews from ${rawData.analyzed_reviews.length} total`);
+    // Tomosu AI Recommendation: Added filtered-review cap to prevent oversized summary requests from overloading browser and backend
+    console.log(`[tomo-id-071] Filtered reviews`, { filteredCount: filtered.length, totalCount: rawData.analyzed_reviews.length, operation: 'applyDateFilter' });
+    const maxReviewsPerSummaryRequest = 500;
+    if (filtered.length > maxReviewsPerSummaryRequest) {
+      alert(`Selected range contains ${filtered.length} reviews, above the ${maxReviewsPerSummaryRequest} review limit. Reference: tomo-id-071. Please choose a narrower date range.`);
+      loading.style.display = 'none';
+      applyBtn.disabled = false;
+      return;
+    }
     
     if (filtered.length === 0) {
       alert('No reviews found in selected date range');
@@ -301,10 +322,13 @@ async function applyDateFilter(startDate, endDate) {
 
       let response;
       try {
+        // Tomosu AI Recommendation: Added outbound request correlation ID so backend summary-generation failures are traceable
+        const requestId = `filter-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
         response = await fetch('https://psmmc-back.vercel.app/api/generate_summaries', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'x-request-id': requestId
           },
           body: JSON.stringify({
             reviews: filtered
@@ -351,9 +375,10 @@ async function applyDateFilter(startDate, endDate) {
     renderDimensionButtons();
     refreshInsights();
     
+  // Tomosu AI Recommendation: Added structured filter error context and safe user reference ID for faster support triage
   } catch (error) {
-    console.error('Filter error:', error);
-    alert(`Error applying filter: ${error.message}`);
+    console.error('[tomo-id-070] Date filter application failed', { operation: 'applyDateFilter', startDate, endDate, errorName: error.name, errorMessage: error.message, action: 'verify backend summary API availability and retry with the same date range' });
+    alert(`Error applying filter. Reference: tomo-id-070. ${error.message}`);
   } finally {
     // Keep loader visible for at least 600ms to avoid flashing
     const elapsed = Date.now() - (typeof loaderShownAt !== 'undefined' ? loaderShownAt : Date.now());
@@ -571,15 +596,17 @@ function refreshInsights() {
           <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px;">
       `;
 
+      // Tomosu AI Recommendation: Escaped external review image URLs before HTML insertion to reduce dashboard injection risk
       images.forEach((imageUrl, index) => {
+        const safeImageUrl = escapeHtml(String(imageUrl || ''));
         reviewContent += `
           <div style="position: relative; cursor: pointer;">
-            <img src="${imageUrl}" 
+            <img src="${safeImageUrl}" 
                  style="width: 80px; height: 80px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;" 
                  alt="Review image ${index + 1}"
                  onmouseover="this.style.transform='scale(1.05)'"
                  onmouseout="this.style.transform='scale(1)'"
-                 onclick="showImageModal('${imageUrl}')"
+                 onclick="showImageModal('${safeImageUrl}')"
                  onerror="this.parentElement.innerHTML='<div style=\\'width: 80px; height: 80px; background: #f3f4f6; border: 1px solid #e2e8f0; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #9ca3af;\\'>Image unavailable</div>'">
           </div>
         `;
