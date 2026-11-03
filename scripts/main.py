@@ -76,10 +76,20 @@ class ReviewSentimentAnalyzer:
             if match:
                 return match.group(1)
         
-        # Fallback: generate ID from name and date
-        name = review.get('name', 'unknown')
-        date = review.get('date', 'unknown')
-        return f"{name}_{date}".replace(' ', '_').replace('/', '_')
+        # Fallback: generate a stable, collision-resistant ID from available review fields.
+        import hashlib
+        name = str(review.get('name') or 'unknown')
+        date = str(review.get('date') or '')
+        text = str(review.get('text') or review.get('snippet') or '')
+        rating = str(review.get('rating') or '')
+        fingerprint_source = json.dumps(
+            {"name": name, "date": date, "text": text[:500], "rating": rating},
+            sort_keys=True,
+            ensure_ascii=False
+        )
+        fingerprint = hashlib.sha256(fingerprint_source.encode('utf-8')).hexdigest()[:16]
+        safe_name = name.replace(' ', '_').replace('/', '_')[:64]
+        return f"{safe_name}_{date or 'no_date'}_{fingerprint}"
 
     
     def analyze_single_review(self, review: Dict[str, Any], retry_count: int = 2) -> Dict[str, Any]:
@@ -158,6 +168,9 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
 - For Arabic text, ensure analysis captures cultural context
 """
 
+        max_retry_count = int(os.getenv('OPENAI_MAX_RETRIES', '2'))
+        retry_count = max(0, min(retry_count, max_retry_count))
+
         for attempt in range(retry_count + 1):
             try:
                 # Tomosu AI Recommendation: Added jittered exponential backoff logging to avoid synchronized retry storms against OpenAI.
@@ -165,8 +178,8 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                     import logging
                     import random
                     wait_time = min((2 ** attempt) + random.uniform(0, 1), 30)
-                    logging.warning(
-                        "[tomo-id-069] Retrying OpenAI review analysis after transient failure",
+                    logging.getLogger(__name__).warning(
+                        "scripts/main.py: Retrying OpenAI review analysis after transient failure",
                         extra={
                             "operation": "analyze_single_review",
                             "attempt": attempt + 1,
@@ -202,11 +215,35 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                 cleaned_response = self._clean_openai_response(raw_response)
                 analysis_result = json.loads(cleaned_response)
                 
-                # Validate required fields
+                # Validate and normalize required fields before downstream use.
                 required_fields = ['sentiment', 'confidence', 'sentiment_score', 'dimensions', 'key_themes', 'severity', 'summary']
                 for field in required_fields:
                     if field not in analysis_result:
                         analysis_result[field] = [] if field in ['dimensions', 'key_themes'] else 0 if field in ['confidence', 'sentiment_score', 'severity'] else 'unknown'
+
+                allowed_sentiments = {'positive', 'negative', 'neutral', 'doubtful'}
+                if analysis_result.get('sentiment') not in allowed_sentiments:
+                    analysis_result['sentiment'] = 'neutral'
+
+                for numeric_field, lower_bound, upper_bound in (
+                    ('confidence', 0.0, 1.0),
+                    ('sentiment_score', -1.0, 1.0),
+                    ('severity', 0.0, 5.0),
+                ):
+                    try:
+                        numeric_value = float(analysis_result.get(numeric_field, 0))
+                    except (TypeError, ValueError):
+                        numeric_value = 0.0
+                    analysis_result[numeric_field] = max(lower_bound, min(numeric_value, upper_bound))
+
+                normalized_dimensions = []
+                for dimension_result in analysis_result.get('dimensions', []):
+                    if not isinstance(dimension_result, dict):
+                        continue
+                    if dimension_result.get('name') not in self.analysis_dimensions:
+                        continue
+                    normalized_dimensions.append(dimension_result)
+                analysis_result['dimensions'] = normalized_dimensions
                 
                 # Extract review ID
                 review_id = self._extract_review_id(review)
@@ -245,19 +282,26 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                 return self._create_fallback_analysis(review, error_msg)
             except Exception as e:
                 error_msg = f"OpenAI API error during review analysis attempt {attempt + 1}: {e}"
+                error_text = str(e).lower()
+                retryable_markers = (
+                    "timeout", "temporarily", "rate limit", "429", "500", "502", "503", "504",
+                    "connection reset", "connection aborted"
+                )
+                is_retryable = any(marker in error_text for marker in retryable_markers)
                 import logging
-                logging.error(
-                    "[tomo-id-071] OpenAI review analysis failed",
+                logging.getLogger(__name__).error(
+                    "scripts/main.py: OpenAI review analysis failed",
                     extra={
                         "operation": "analyze_single_review",
                         "attempt": attempt + 1,
                         "max_attempts": retry_count + 1,
                         "review_id": self._extract_review_id(review),
                         "error_type": type(e).__name__,
+                        "retryable": is_retryable,
                         "action": "Check OpenAI service health, API key validity, and request timeout settings."
                     }
                 )
-                if attempt < retry_count:
+                if attempt < retry_count and is_retryable:
                     continue
                 return self._create_fallback_analysis(review, error_msg)
     
@@ -555,7 +599,15 @@ Generate a summary in the following JSON format:
         failed_count = 0
         
         for i, review in enumerate(reviews):
-            print(f"Processing review {i+1}/{len(reviews)}")
+            import logging
+            logging.getLogger(__name__).info(
+                "scripts/main.py: processing review",
+                extra={
+                    "operation": "batch_analyze_reviews",
+                    "review_index": i + 1,
+                    "review_total": len(reviews)
+                }
+            )
             
             result = self.analyze_single_review(review)
             analyzed_reviews.append(result)
@@ -788,7 +840,11 @@ def main():
         print(f"\nResults saved to: {args.output}")
         
     except Exception as e:
-        print(f"Error: {e}")
+        import logging
+        logging.getLogger(__name__).exception(
+            "scripts/main.py: fatal pipeline error",
+            extra={"operation": "main", "error_type": type(e).__name__}
+        )
 
 if __name__ == "__main__":
     main()

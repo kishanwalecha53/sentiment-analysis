@@ -125,12 +125,24 @@ def extract_reviews():
                             continue
                 
                 else:
-                    error_msg = f"API Error on page {page_num}: {results['error']}"
-                    print(error_msg)
+                    api_error = str(results['error'])
+                    error_msg = f"API Error on page {page_num}: {api_error}"
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "scripts/serp.py: SerpAPI page fetch failed",
+                        extra={
+                            "operation": "extract_reviews",
+                            "page": page_num,
+                            "api_error": api_error,
+                            "incomplete_extraction": "pagination token" in api_error.lower(),
+                            "action": "Retry extraction from the last successful page or reduce SERP_PAGE_DELAY_SECONDS if tokens expire."
+                        }
+                    )
                     errors.append({
                         "page": page_num,
                         "error": error_msg,
-                        "api_error": results["error"]
+                        "api_error": api_error,
+                        "incomplete_extraction": "pagination token" in api_error.lower()
                     })
                     break
 
