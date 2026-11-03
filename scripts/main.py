@@ -177,6 +177,13 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                     )
                     time.sleep(wait_time)
                 
+                max_consecutive_failures = int(os.getenv('OPENAI_MAX_CONSECUTIVE_FAILURES', '5'))
+                if getattr(self, '_openai_consecutive_failures', 0) >= max_consecutive_failures:
+                    raise RuntimeError(
+                        f"OpenAI dependency circuit open after {max_consecutive_failures} consecutive failures. "
+                        "Action: check provider health and rerun after recovery."
+                    )
+
                 response = self.client.chat.completions.create(
                     model="gpt-4",
                     messages=[
@@ -192,6 +199,7 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                     temperature=0.3,
                     max_tokens=1000
                 )
+                self._openai_consecutive_failures = 0
                 
                 # Get raw response
                 raw_response = response.choices[0].message.content
@@ -202,11 +210,29 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                 cleaned_response = self._clean_openai_response(raw_response)
                 analysis_result = json.loads(cleaned_response)
                 
-                # Validate required fields
+                # Validate required fields and normalize OpenAI schema drift.
                 required_fields = ['sentiment', 'confidence', 'sentiment_score', 'dimensions', 'key_themes', 'severity', 'summary']
                 for field in required_fields:
                     if field not in analysis_result:
                         analysis_result[field] = [] if field in ['dimensions', 'key_themes'] else 0 if field in ['confidence', 'sentiment_score', 'severity'] else 'unknown'
+
+                def _coerce_float(value, default=0.0):
+                    try:
+                        return float(value)
+                    except (TypeError, ValueError):
+                        return default
+
+                analysis_result['confidence'] = max(0.0, min(_coerce_float(analysis_result.get('confidence')), 1.0))
+                analysis_result['sentiment_score'] = max(-1.0, min(_coerce_float(analysis_result.get('sentiment_score')), 1.0))
+                try:
+                    analysis_result['severity'] = max(0, min(int(analysis_result.get('severity', 0)), 5))
+                except (TypeError, ValueError):
+                    analysis_result['severity'] = 0
+                allowed_dimensions = set(self.analysis_dimensions)
+                analysis_result['dimensions'] = [
+                    dim for dim in analysis_result.get('dimensions', [])
+                    if isinstance(dim, dict) and dim.get('name') in allowed_dimensions
+                ]
                 
                 # Extract review ID
                 review_id = self._extract_review_id(review)
@@ -214,7 +240,7 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                 # Add original review data to the result in the expected format
                 result = {
                     "review_id": review_id,
-                    "author": review.get('name', ''),
+                    "author": review.get('name', ''),  # Keep in output data; do not include raw author in logs.
                     "rating": rating,
                     "text": review_text,  # Preserve original text (Arabic or English)
                     "date": review.get('date', ''),
@@ -553,9 +579,16 @@ Generate a summary in the following JSON format:
         
         analyzed_reviews = []
         failed_count = 0
+        max_batch_seconds = float(os.getenv('MAX_BATCH_SECONDS', '3600'))
+        batch_started_at = time.monotonic()
         
         for i, review in enumerate(reviews):
-            print(f"Processing review {i+1}/{len(reviews)}")
+            if time.monotonic() - batch_started_at > max_batch_seconds:
+                raise TimeoutError(
+                    f"Review batch exceeded runtime budget of {max_batch_seconds} seconds at review {i+1}/{len(reviews)}. "
+                    "Action: split the input file or reduce OpenAI retry volume before rerunning."
+                )
+            print(f"scripts/main.py: Processing review {i+1}/{len(reviews)}")
             
             result = self.analyze_single_review(review)
             analyzed_reviews.append(result)
@@ -672,8 +705,14 @@ Generate a summary in the following JSON format:
 def load_reviews_from_file(file_path: str) -> List[Dict[str, Any]]:
     """Load reviews from JSON file - handles the new input format"""
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='strict') as f:
+                data = json.load(f)
+        except UnicodeDecodeError as e:
+            raise ValueError(
+                f"scripts/main.py: Invalid UTF-8 in review input {file_path} at byte {e.start}. "
+                "Action: re-export the source file as UTF-8 instead of replacing invalid bytes."
+            ) from e
         
         # Handle the new JSON structure
         if isinstance(data, dict) and 'reviews' in data:

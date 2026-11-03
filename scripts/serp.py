@@ -57,6 +57,8 @@ def extract_reviews():
         "data_id": "0x3e2f039b4cec3f29:0x28429402fbebe3"
     }
 
+    import uuid
+    correlation_id = f"serp-{uuid.uuid4().hex[:12]}"
     search = GoogleSearch(params)
     reviews = []
     errors = []
@@ -84,6 +86,11 @@ def extract_reviews():
                     for result in page_reviews:
                         try:
                             # Safely extract all fields with proper error handling
+                            extracted_text = safe_get_nested(result, "extracted_snippet", "original", default="")
+                            missing_fields = []
+                            if "extracted_snippet" not in result:
+                                missing_fields.append("extracted_snippet")
+
                             review_data = {
                                 "page": page_num,
                                 "name": safe_get_nested(result, "user", "name", default=""),
@@ -94,7 +101,8 @@ def extract_reviews():
                                 "snippet": result.get("snippet", ""),
                                 "images": result.get("images", []),
                                 "local_guide": safe_get_nested(result, "user", "local_guide", default=False),
-                                "text": safe_get_nested(result, "extracted_snippet", "original", default=""),
+                                "text": extracted_text,
+                                "missing_fields": missing_fields,
                             }
                             reviews.append(review_data)
                             
@@ -200,9 +208,9 @@ def extract_reviews():
     saved_file = save_data_to_json(final_data)
     
     # Print summary
-    print(f"\n=== EXTRACTION SUMMARY ===")
-    print(f"Total reviews extracted: {len(reviews)}")
-    print(f"Total pages processed: {page_num}")
+    print(f"scripts/serp.py: EXTRACTION SUMMARY correlation_id={correlation_id}", flush=True)
+    print(f"scripts/serp.py: Total reviews extracted: {len(reviews)}", flush=True)
+    print(f"scripts/serp.py: Total pages processed: {page_num}", flush=True)
     print(f"Errors encountered: {len(errors)}")
     if saved_file:
         print(f"Data saved to: {saved_file}")
