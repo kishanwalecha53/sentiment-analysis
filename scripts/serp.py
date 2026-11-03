@@ -18,18 +18,24 @@ def save_data_to_json(data, filename_prefix="reviews_data"):
     """Save data to JSON file with timestamp"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{filename_prefix}_{timestamp}.json"
+    # Tomosu AI Recommendation: Added structured extraction file-save logs so persistence failures are searchable during incidents
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        print(f"Data saved to {filename}")
+        print(json.dumps({"message": "[tomo-id-071] Review extraction data saved", "operation": "save_reviews_json", "filename": filename}, ensure_ascii=False))
         return filename
     except Exception as e:
-        print(f"Error saving to file {filename}: {e}")
+        print(json.dumps({"message": "[tomo-id-072] Review extraction data save failed", "operation": "save_reviews_json", "filename": filename, "error_type": type(e).__name__, "error_message": str(e), "action": "verify disk permissions and available storage"}, ensure_ascii=False))
         return None
 
+# Tomosu AI Recommendation: Externalized SerpAPI key to prevent credential leaks and fail fast on missing config
 def extract_reviews():
+    serpapi_api_key = os.getenv("SERPAPI_API_KEY")
+    if not serpapi_api_key:
+        raise RuntimeError("ERR_SERPAPI_CONFIG: SERPAPI_API_KEY is not set. Action: configure the secret before running review extraction.")
+
     params = {
-        "api_key": "your_serp_api_key",
+        "api_key": serpapi_api_key,
         "engine": "google_maps_reviews",
         "hl": "ar",
         "data_id": "0x3e2f039b4cec3f29:0x28429402fbebe3"
@@ -37,12 +43,14 @@ def extract_reviews():
     }
 
     search = GoogleSearch(params)
+    # Tomosu AI Recommendation: Added a configurable page cap to prevent unbounded SerpAPI pagination and quota exhaustion
     reviews = []
     errors = []
     page_num = 0
+    max_pages = int(os.getenv("MAX_SERPAPI_PAGES", "100"))
     
     try:
-        while True:
+        while page_num < max_pages:
             page_num += 1
             
             try:

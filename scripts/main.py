@@ -16,9 +16,10 @@ def chunk_list(lst, chunk_size):
 
 
 class ReviewSentimentAnalyzer:
+    # Tomosu AI Recommendation: Added explicit OpenAI timeout and disabled hidden SDK retries to prevent indefinite AI dependency hangs
     def __init__(self, openai_api_key: str):
         """Initialize the analyzer with OpenAI API key"""
-        self.client = openai.OpenAI(api_key=openai_api_key)
+        self.client = openai.OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=0)
         
         # Define sentiment analysis dimensions
         self.analysis_dimensions = [
@@ -80,7 +81,8 @@ class ReviewSentimentAnalyzer:
     def analyze_single_review(self, review: Dict[str, Any], retry_count: int = 2) -> Dict[str, Any]:
         """Analyze sentiment for a single review with retry logic"""
         
-        review_text = review.get('text', '')
+        # Tomosu AI Recommendation: Bounded and sanitized external review text before LLM prompting to reduce prompt-injection and token-cost risk
+        review_text = str(review.get('text', ''))[:5000].replace('```', '` ` `')
         rating = review.get('rating', 0)
         
         # Check if the text appears to be in Arabic
@@ -147,10 +149,19 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
 
         for attempt in range(retry_count + 1):
             try:
+                # Tomosu AI Recommendation: Added capped jittered backoff and structured retry logging to avoid synchronized OpenAI retry storms
                 # Add exponential backoff for retries
                 if attempt > 0:
-                    wait_time = (2 ** attempt) + 1
-                    print(f"  Retrying in {wait_time} seconds... (attempt {attempt + 1})")
+                    import random
+                    wait_time = min(30.0, (2 ** attempt) + random.uniform(0.1, 1.5))
+                    print(json.dumps({
+                        "message": "[tomo-id-070] Retrying OpenAI review analysis after transient failure",
+                        "operation": "analyze_single_review",
+                        "attempt": attempt + 1,
+                        "max_attempts": retry_count + 1,
+                        "wait_seconds": round(wait_time, 2),
+                        "action": "monitor OpenAI availability if retries increase"
+                    }, ensure_ascii=False))
                     time.sleep(wait_time)
                 
                 response = self.client.chat.completions.create(
@@ -236,6 +247,7 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
         
         review_id = self._extract_review_id(review)
         
+        # Tomosu AI Recommendation: Marked fallback analyses explicitly so dependency failures are not mistaken for full AI results
         return {
             "review_id": review_id,
             "author": review.get('name', ''),
@@ -250,7 +262,9 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                 "dimensions": [],
                 "key_themes": [],
                 "severity": 0,
-                "summary": f"Fallback analysis based on rating only. Error: {error_msg}"
+                "fallback_used": True,
+                "fallback_reason": error_msg,
+                "summary": f"Fallback analysis based on rating only after AI analysis failure. Action: review OpenAI dependency status before relying on this record. Error: {error_msg}"
             },
             "processed_at": datetime.now().isoformat(),
             "error": error_msg
@@ -664,7 +678,10 @@ def main():
     parser.add_argument('-d', '--delay', type=float, default=1.0, 
                        help='Delay between API calls in seconds (default: 1.0)')
     
+    # Tomosu AI Recommendation: Validated retry delay bounds to prevent hot loops or invalid sleeps from bad CLI input
     args = parser.parse_args()
+    if args.delay <= 0 or args.delay > 60:
+        parser.error("ERR_INVALID_DELAY: --delay must be between 0.01 and 60 seconds. Action: choose a positive rate-limit delay suitable for OpenAI quotas.")
     
     # Get API key
     api_key = args.api_key or os.getenv('OPENAI_API_KEY')

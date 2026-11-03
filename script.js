@@ -8,14 +8,41 @@ let isFilterActive = false;
 const dimensions = ['Service Quality', 'Facility Experience', 'Trust & Safety', 'Clinical Care', 'Operations'];
 
 // Cache management with expiration
+// Tomosu AI Recommendation: Bounded localStorage cache and logged cache failures to prevent silent quota exhaustion
 const CACHE_DURATION = 12 * 60 * 60 * 1000; // 12 hours in milliseconds
+const MAX_FILTER_CACHE_ENTRIES = 20;
 
 function setCacheWithExpiry(key, value) {
-  const item = {
-    value: value,
-    expiry: Date.now() + CACHE_DURATION
-  };
-  localStorage.setItem(key, JSON.stringify(item));
+  try {
+    const filterKeys = Object.keys(localStorage).filter(k => k.startsWith('filter_'));
+    if (!localStorage.getItem(key) && filterKeys.length >= MAX_FILTER_CACHE_ENTRIES) {
+      const oldestKey = filterKeys
+        .map(k => ({ key: k, raw: localStorage.getItem(k) }))
+        .map(entry => {
+          try {
+            return { key: entry.key, expiry: JSON.parse(entry.raw).expiry || 0 };
+          } catch (e) {
+            return { key: entry.key, expiry: 0 };
+          }
+        })
+        .sort((a, b) => a.expiry - b.expiry)[0]?.key;
+      if (oldestKey) localStorage.removeItem(oldestKey);
+    }
+
+    const item = {
+      value: value,
+      expiry: Date.now() + CACHE_DURATION
+    };
+    localStorage.setItem(key, JSON.stringify(item));
+  } catch (e) {
+    console.warn('[tomo-id-066] Filter cache write failed; continuing without cache', {
+      operation: 'set_filter_cache',
+      cacheKey: key,
+      errorType: e && e.name,
+      errorMessage: e && e.message,
+      action: 'clear browser storage or reduce cached filter ranges'
+    });
+  }
 }
 
 function getCacheWithExpiry(key) {
@@ -37,6 +64,12 @@ function getCacheWithExpiry(key) {
     return item.value;
   } catch (e) {
     localStorage.removeItem(key);
+    console.warn('[tomo-id-067] Filter cache entry was invalid and removed', {
+      operation: 'get_filter_cache',
+      cacheKey: key,
+      errorType: e && e.name,
+      action: 'regenerate filter summaries from the API'
+    });
     return null;
   }
 }
@@ -54,14 +87,37 @@ function clearExpiredCache() {
 // Clear expired cache on page load
 clearExpiredCache();
 
+// Tomosu AI Recommendation: Added fail-fast timeout and response validation so a stalled dashboard data load is observable
 // Load data
-fetch('./analysis_results.json')
-  .then(r => r.json())
-  .then(json => { 
-    rawData = json; 
-    originalDimensionSummaries = json.dimension_summaries;
-    initFromData(json); 
+const analysisResultsController = new AbortController();
+const analysisResultsTimeoutId = setTimeout(() => analysisResultsController.abort(), 10000);
+
+fetch('./analysis_results.json', { signal: analysisResultsController.signal })
+  .then(r => {
+    if (!r.ok) {
+      throw new Error(`ERR_ANALYSIS_RESULTS_FETCH: HTTP ${r.status}. Action: verify analysis_results.json is deployed and readable.`);
+    }
+    return r.json();
+  })
+  .then(json => {
+    clearTimeout(analysisResultsTimeoutId);
+    if (!json || !Array.isArray(json.analyzed_reviews) || typeof json.summary_statistics !== 'object') {
+      throw new Error('ERR_ANALYSIS_RESULTS_SCHEMA: analysis_results.json is missing analyzed_reviews or summary_statistics. Action: regenerate the analysis output.');
+    }
+    rawData = json;
+    originalDimensionSummaries = json.dimension_summaries || {};
+    initFromData(json);
     initializeFilters();
+  })
+  .catch(error => {
+    clearTimeout(analysisResultsTimeoutId);
+    console.error('[tomo-id-065] Dashboard analysis results load failed', {
+      operation: 'load_analysis_results',
+      errorType: error && error.name,
+      errorMessage: error && error.message,
+      action: 'verify analysis_results.json is present, valid JSON, and reachable within 10s'
+    });
+    alert('Unable to load dashboard data. Reference: tomo-id-065. Please retry or contact support.');
   });
 
 function initFromData(data) {
@@ -294,17 +350,32 @@ async function applyDateFilter(startDate, endDate) {
       console.log('Using cached dimension summaries');
       tempDimensionSummaries = cached;
     } else {
-      console.log('Calling API to generate summaries...');
+      // Tomosu AI Recommendation: Capped summary payloads and propagated request IDs to prevent overload and aid tracing
+      const maxSummarizedReviews = 500;
+      if (filtered.length > maxSummarizedReviews) {
+        alert(`Selected range contains ${filtered.length} reviews. Please narrow the range to ${maxSummarizedReviews} reviews or fewer.`);
+        return;
+      }
+
+      const requestId = (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const configuredApiBaseUrl = document.querySelector('meta[name="psmmc-api-base-url"]')?.content || window.PSMMC_API_BASE_URL || 'https://psmmc-back.vercel.app';
+      console.info('[tomo-id-068] Calling summary generation API', {
+        operation: 'generate_dimension_summaries',
+        requestId,
+        reviewCount: filtered.length,
+        timeoutMs: 90000
+      });
       const controller = new AbortController();
       const timeoutMs = 90000; // 90 seconds
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       let response;
       try {
-        response = await fetch('https://psmmc-back.vercel.app/api/generate_summaries', {
+        response = await fetch(`${configuredApiBaseUrl.replace(/\/$/, '')}/api/generate_summaries`, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'x-request-id': requestId
           },
           body: JSON.stringify({
             reviews: filtered
@@ -314,7 +385,7 @@ async function applyDateFilter(startDate, endDate) {
       } catch (err) {
         clearTimeout(timeoutId);
         if (err && err.name === 'AbortError') {
-          throw new Error('Request timed out after 90 seconds');
+          throw new Error(`ERR_SUMMARY_TIMEOUT: Summary request ${requestId} timed out after 90 seconds. Action: narrow the date range or retry later.`);
         }
         throw err;
       }
@@ -351,9 +422,19 @@ async function applyDateFilter(startDate, endDate) {
     renderDimensionButtons();
     refreshInsights();
     
+  // Tomosu AI Recommendation: Added user-visible reference ID and structured error context for faster support triage
   } catch (error) {
-    console.error('Filter error:', error);
-    alert(`Error applying filter: ${error.message}`);
+    const referenceId = (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : `filter-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    console.error('[tomo-id-069] Date filter application failed', {
+      operation: 'apply_date_filter',
+      referenceId,
+      startDate,
+      endDate,
+      errorType: error && error.name,
+      errorMessage: error && error.message,
+      action: 'verify summary API availability and selected date range size'
+    });
+    alert(`Unable to apply filter. Reference: ${referenceId}. Please retry with a narrower date range or contact support.`);
   } finally {
     // Keep loader visible for at least 600ms to avoid flashing
     const elapsed = Date.now() - (typeof loaderShownAt !== 'undefined' ? loaderShownAt : Date.now());
