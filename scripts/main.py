@@ -76,14 +76,26 @@ class ReviewSentimentAnalyzer:
             if match:
                 return match.group(1)
         
-        # Fallback: generate ID from name and date
-        name = review.get('name', 'unknown')
-        date = review.get('date', 'unknown')
-        return f"{name}_{date}".replace(' ', '_').replace('/', '_')
+        # Fallback: generate a stable, low-collision ID from available review content.
+        import hashlib
+        fallback_parts = [
+            str(review.get('name', 'unknown')),
+            str(review.get('date', '')),
+            str(review.get('rating', '')),
+            str(review.get('text') or review.get('snippet') or '')[:500]
+        ]
+        digest = hashlib.sha256('|'.join(fallback_parts).encode('utf-8')).hexdigest()[:16]
+        return f"review_{digest}"
 
     
-    def analyze_single_review(self, review: Dict[str, Any], retry_count: int = 2) -> Dict[str, Any]:
-        """Analyze sentiment for a single review with retry logic"""
+    def analyze_single_review(self, review: Dict[str, Any], retry_count: int = None) -> Dict[str, Any]:
+        """Analyze sentiment for a single review with bounded retry logic."""
+        if retry_count is None:
+            try:
+                retry_count = int(os.getenv('OPENAI_RETRY_COUNT', '2'))
+            except ValueError:
+                retry_count = 2
+        retry_count = max(0, min(retry_count, 3))
         
         # Tomosu AI Recommendation: Validated and capped review text before prompting to reduce PHI exposure and prompt-injection blast radius.
         review_text = str(review.get('text', '') or '')
@@ -202,11 +214,23 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                 cleaned_response = self._clean_openai_response(raw_response)
                 analysis_result = json.loads(cleaned_response)
                 
-                # Validate required fields
-                required_fields = ['sentiment', 'confidence', 'sentiment_score', 'dimensions', 'key_themes', 'severity', 'summary']
-                for field in required_fields:
-                    if field not in analysis_result:
-                        analysis_result[field] = [] if field in ['dimensions', 'key_themes'] else 0 if field in ['confidence', 'sentiment_score', 'severity'] else 'unknown'
+                # Validate and normalize the OpenAI response contract before using it downstream.
+                allowed_sentiments = {'positive', 'negative', 'neutral', 'doubtful'}
+                if analysis_result.get('sentiment') not in allowed_sentiments:
+                    analysis_result['sentiment'] = 'neutral'
+
+                for numeric_field, default_value in {'confidence': 0.0, 'sentiment_score': 0.0, 'severity': 0}.items():
+                    try:
+                        analysis_result[numeric_field] = float(analysis_result.get(numeric_field, default_value))
+                    except (TypeError, ValueError):
+                        analysis_result[numeric_field] = default_value
+
+                if not isinstance(analysis_result.get('dimensions'), list):
+                    analysis_result['dimensions'] = []
+                if not isinstance(analysis_result.get('key_themes'), list):
+                    analysis_result['key_themes'] = []
+                if not isinstance(analysis_result.get('summary'), str):
+                    analysis_result['summary'] = 'unknown'
                 
                 # Extract review ID
                 review_id = self._extract_review_id(review)
@@ -541,8 +565,12 @@ Generate a summary in the following JSON format:
                             rate_limit_delay: float = 1.0) -> Dict[str, Any]:
         """Analyze multiple reviews and generate comprehensive report"""
         
-        # Tomosu AI Recommendation: Added batch-size guardrail to prevent unbounded review jobs from exhausting OpenAI quota or memory.
-        max_batch_reviews = int(os.getenv('MAX_BATCH_REVIEWS', '5000'))
+        # Keep batch jobs bounded so one run cannot monopolize CPU/API quota.
+        try:
+            max_batch_reviews = int(os.getenv('MAX_BATCH_REVIEWS', '1000'))
+        except ValueError:
+            max_batch_reviews = 1000
+        max_batch_reviews = max(1, min(max_batch_reviews, 5000))
         if len(reviews) > max_batch_reviews:
             raise ValueError(
                 f"Review batch too large for sentiment analysis: {len(reviews)} reviews exceeds limit {max_batch_reviews}. "
@@ -672,8 +700,14 @@ Generate a summary in the following JSON format:
 def load_reviews_from_file(file_path: str) -> List[Dict[str, Any]]:
     """Load reviews from JSON file - handles the new input format"""
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        try:
+            raw_text = Path(file_path).read_bytes().decode('utf-8')
+        except UnicodeDecodeError as e:
+            raise ValueError(
+                f"Invalid UTF-8 in review file {file_path} at byte {e.start}. "
+                "Action: fix or quarantine the source file; do not use replacement characters for production analysis."
+            ) from e
+        data = json.loads(raw_text)
         
         # Handle the new JSON structure
         if isinstance(data, dict) and 'reviews' in data:

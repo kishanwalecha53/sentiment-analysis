@@ -137,11 +137,18 @@ def extract_reviews():
                 # Check for next page
                 try:
                     pagination = results.get("serpapi_pagination", {})
-                    if pagination.get("next") and pagination.get("next_page_token"):
+                    next_token = pagination.get("next_page_token")
+                    next_url = pagination.get("next")
+                    if next_url and next_token:
                         # Update search params for next page
-                        next_url = pagination["next"]
                         search.params_dict.update(dict(parse_qsl(urlsplit(next_url).query)))
                     else:
+                        if page_num < max_pages:
+                            errors.append({
+                                "page": page_num,
+                                "error": "Pagination ended before max_pages; next_page_token missing or expired",
+                                "timestamp": datetime.now().isoformat()
+                            })
                         print("No more pages to process.")
                         break
                         
