@@ -10,11 +10,22 @@ const dimensions = ['Service Quality', 'Facility Experience', 'Trust & Safety', 
 // Cache management with expiration
 const CACHE_DURATION = 12 * 60 * 60 * 1000; // 12 hours in milliseconds
 
+// Tomosu AI Recommendation: Added bounded localStorage cache eviction to prevent browser quota exhaustion from many filter ranges
 function setCacheWithExpiry(key, value) {
+  const maxFilterCacheEntries = 25;
   const item = {
     value: value,
-    expiry: Date.now() + CACHE_DURATION
+    expiry: Date.now() + CACHE_DURATION,
+    createdAt: Date.now()
   };
+
+  const filterKeys = Object.keys(localStorage).filter(cacheKey => cacheKey.startsWith('filter_'));
+  filterKeys
+    .map(cacheKey => ({ cacheKey, parsed: JSON.parse(localStorage.getItem(cacheKey) || '{}') }))
+    .sort((a, b) => (a.parsed.createdAt || a.parsed.expiry || 0) - (b.parsed.createdAt || b.parsed.expiry || 0))
+    .slice(0, Math.max(0, filterKeys.length - maxFilterCacheEntries + 1))
+    .forEach(entry => localStorage.removeItem(entry.cacheKey));
+
   localStorage.setItem(key, JSON.stringify(item));
 }
 
@@ -54,14 +65,22 @@ function clearExpiredCache() {
 // Clear expired cache on page load
 clearExpiredCache();
 
-// Load data
-fetch('./analysis_results.json')
+// Tomosu AI Recommendation: Added timeout and failure logging for initial dashboard data load to avoid blank-page hangs
+const initialDataController = new AbortController();
+const initialDataTimeoutId = setTimeout(() => initialDataController.abort(), 10000);
+
+fetch('./analysis_results.json', { signal: initialDataController.signal })
   .then(r => r.json())
   .then(json => { 
+    clearTimeout(initialDataTimeoutId);
     rawData = json; 
     originalDimensionSummaries = json.dimension_summaries;
     initFromData(json); 
     initializeFilters();
+  })
+  .catch(error => {
+    clearTimeout(initialDataTimeoutId);
+    console.error('[tomo-id-068] Dashboard analysis_results.json load failed', { event: 'dashboard_data_load_failed', errorName: error.name, action: 'verify analysis_results.json exists and is reachable' });
   });
 
 function initFromData(data) {
@@ -301,13 +320,23 @@ async function applyDateFilter(startDate, endDate) {
 
       let response;
       try {
-        response = await fetch('https://psmmc-back.vercel.app/api/generate_summaries', {
+        // Tomosu AI Recommendation: Bounded summaries payload and propagated correlation ID to prevent overload and improve downstream traceability
+        const summariesApiUrl = window.SUMMARIES_API_URL || 'https://psmmc-back.vercel.app/api/generate_summaries';
+        const correlationId = window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : `summary-${Date.now()}`;
+        const maxReviewsPerSummary = 1000;
+        const reviewsForSummary = filtered.slice(0, maxReviewsPerSummary);
+        if (filtered.length > maxReviewsPerSummary) {
+          console.warn('[tomo-id-069] Filter summaries payload truncated', { event: 'summaries_payload_truncated', originalCount: filtered.length, sentCount: reviewsForSummary.length, correlationId });
+        }
+
+        response = await fetch(summariesApiUrl, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'x-request-id': correlationId
           },
           body: JSON.stringify({
-            reviews: filtered
+            reviews: reviewsForSummary
           }),
           signal: controller.signal
         });
@@ -571,15 +600,23 @@ function refreshInsights() {
           <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px;">
       `;
 
+      // Tomosu AI Recommendation: Sanitized external review image URLs to prevent DOM injection from untrusted review payloads
       images.forEach((imageUrl, index) => {
+        const rawImageUrl = String(imageUrl || '');
+        const isSafeImageUrl = /^https?:\/\//i.test(rawImageUrl);
+        if (!isSafeImageUrl) {
+          return;
+        }
+        const safeImageUrl = escapeHtml(rawImageUrl);
+        const encodedImageUrl = encodeURIComponent(rawImageUrl);
         reviewContent += `
           <div style="position: relative; cursor: pointer;">
-            <img src="${imageUrl}" 
+            <img src="${safeImageUrl}" 
                  style="width: 80px; height: 80px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;" 
                  alt="Review image ${index + 1}"
                  onmouseover="this.style.transform='scale(1.05)'"
                  onmouseout="this.style.transform='scale(1)'"
-                 onclick="showImageModal('${imageUrl}')"
+                 onclick="showImageModal(decodeURIComponent('${encodedImageUrl}'))"
                  onerror="this.parentElement.innerHTML='<div style=\\'width: 80px; height: 80px; background: #f3f4f6; border: 1px solid #e2e8f0; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #9ca3af;\\'>Image unavailable</div>'">
           </div>
         `;

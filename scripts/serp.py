@@ -24,12 +24,22 @@ def save_data_to_json(data, filename_prefix="reviews_data"):
         print(f"Data saved to {filename}")
         return filename
     except Exception as e:
-        print(f"Error saving to file {filename}: {e}")
+        # Tomosu AI Recommendation: Added structured save-failure logging so support can identify file, operation, and error type quickly
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error("[tomo-id-067] Failed to save SerpAPI extraction output", extra={"event": "serpapi_save_failed", "filename": filename, "error_type": type(e).__name__, "action": "verify disk permissions and available storage before retrying"})
         return None
 
 def extract_reviews():
+    # Tomosu AI Recommendation: Externalized SerpAPI key to prevent credential leaks and fail fast when extraction configuration is missing
+    import os
+
+    serpapi_api_key = os.getenv("SERPAPI_API_KEY")
+    if not serpapi_api_key:
+        raise RuntimeError("ERR_SERPAPI_CONFIG_MISSING: SerpAPI extraction failed because SERPAPI_API_KEY is not set. Action: configure the secret before running review extraction.")
+
     params = {
-        "api_key": "your_serp_api_key",
+        "api_key": serpapi_api_key,
         "engine": "google_maps_reviews",
         "hl": "ar",
         "data_id": "0x3e2f039b4cec3f29:0x28429402fbebe3"

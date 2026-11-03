@@ -18,7 +18,8 @@ def chunk_list(lst, chunk_size):
 class ReviewSentimentAnalyzer:
     def __init__(self, openai_api_key: str):
         """Initialize the analyzer with OpenAI API key"""
-        self.client = openai.OpenAI(api_key=openai_api_key)
+        # Tomosu AI Recommendation: Added explicit OpenAI timeout and disabled hidden SDK retries to prevent indefinite dependency hangs
+        self.client = openai.OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=0)
         
         # Define sentiment analysis dimensions
         self.analysis_dimensions = [
@@ -80,8 +81,13 @@ class ReviewSentimentAnalyzer:
     def analyze_single_review(self, review: Dict[str, Any], retry_count: int = 2) -> Dict[str, Any]:
         """Analyze sentiment for a single review with retry logic"""
         
-        review_text = review.get('text', '')
-        rating = review.get('rating', 0)
+        # Tomosu AI Recommendation: Validated and bounded external review payloads to prevent malformed data crashes and LLM prompt abuse
+        if not isinstance(review, dict):
+            raise ValueError("ERR_REVIEW_PAYLOAD_INVALID: review analysis failed because payload is not an object. Action: validate the review export before retrying.")
+
+        review_text = str(review.get('text', '') or '')[:5000].replace('```', '` ` `')
+        rating_value = review.get('rating', 0)
+        rating = rating_value if isinstance(rating_value, (int, float)) and 0 <= rating_value <= 5 else 0
         
         # Check if the text appears to be in Arabic
         has_arabic = bool(re.search(r'[\u0600-\u06FF]', review_text))
@@ -147,10 +153,13 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
 
         for attempt in range(retry_count + 1):
             try:
-                # Add exponential backoff for retries
+                # Tomosu AI Recommendation: Added capped jittered retry backoff and structured retry signal to prevent synchronized OpenAI retry storms
                 if attempt > 0:
-                    wait_time = (2 ** attempt) + 1
-                    print(f"  Retrying in {wait_time} seconds... (attempt {attempt + 1})")
+                    import logging
+                    import random
+                    logger = logging.getLogger(__name__)
+                    wait_time = min(30.0, (2 ** attempt) + random.uniform(0.1, 1.5))
+                    logger.info("[tomo-id-065] OpenAI review analysis retry scheduled", extra={"event": "openai_review_retry", "attempt": attempt + 1, "wait_seconds": round(wait_time, 2)})
                     time.sleep(wait_time)
                 
                 response = self.client.chat.completions.create(
@@ -196,7 +205,8 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                     "date": review.get('date', ''),
                     "images": review.get('images', []),  # Include images if available
                     "analysis": analysis_result,
-                    "processed_at": datetime.now().isoformat()
+                    # Tomosu AI Recommendation: Switched processing timestamp to timezone-aware UTC for reliable cross-region incident correlation
+                    "processed_at": datetime.now(__import__("datetime").timezone.utc).isoformat()
                 }
                 
                 return result
@@ -628,8 +638,13 @@ def load_reviews_from_file(file_path: str) -> List[Dict[str, Any]]:
         # Handle the new JSON structure
         if isinstance(data, dict) and 'reviews' in data:
             # New format: {"metadata": {...}, "reviews": [...]}
+            # Tomosu AI Recommendation: Validated and capped imported review arrays to prevent oversized files from exhausting memory or OpenAI quota
             reviews = data['reviews']
-            print(f"Loaded {len(reviews)} reviews from new format")
+            if not isinstance(reviews, list):
+                raise ValueError("ERR_REVIEWS_SCHEMA_INVALID: reviews field must be a list. Action: regenerate the SerpAPI export and retry.")
+            if len(reviews) > 10000:
+                raise ValueError("ERR_REVIEWS_LIMIT_EXCEEDED: reviews file contains more than 10000 records. Action: split the export into smaller batches.")
+            print(f"[tomo-id-066] Loaded {len(reviews)} reviews from new format")
             return reviews
         elif isinstance(data, list):
             # Old format: direct list of reviews
