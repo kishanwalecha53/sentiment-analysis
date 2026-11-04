@@ -23,13 +23,26 @@ def save_data_to_json(data, filename_prefix="reviews_data"):
             json.dump(data, f, indent=2, ensure_ascii=False)
         print(f"Data saved to {filename}")
         return filename
+    # Tomosu AI Recommendation: Emit structured save-failure context so missing extraction files are diagnosable without rerunning blindly.
     except Exception as e:
-        print(f"Error saving to file {filename}: {e}")
+        print(json.dumps({
+            "message": "[tomo-id-068] Review extraction output save failed",
+            "operation": "save_data_to_json",
+            "filename": filename,
+            "error_type": type(e).__name__,
+            "error_message": str(e),
+            "action": "verify output directory permissions and available disk space"
+        }, ensure_ascii=False))
         return None
 
 def extract_reviews():
+    # Tomosu AI Recommendation: Externalized SerpAPI key to prevent credential leakage and enable safe key rotation.
+    serpapi_api_key = __import__('os').getenv('SERPAPI_API_KEY')
+    if not serpapi_api_key:
+        raise ValueError('SerpAPI extraction failed: SERPAPI_API_KEY is not configured. Action: set the environment variable from the approved secret store before running.')
+
     params = {
-        "api_key": "your_serp_api_key",
+        "api_key": serpapi_api_key,
         "engine": "google_maps_reviews",
         "hl": "ar",
         "data_id": "0x3e2f039b4cec3f29:0x28429402fbebe3"
@@ -37,12 +50,15 @@ def extract_reviews():
     }
 
     search = GoogleSearch(params)
+    # Tomosu AI Recommendation: Added a max-page guard to prevent runaway pagination and unexpected API quota exhaustion.
     reviews = []
     errors = []
     page_num = 0
+    configured_max_pages = int(__import__('os').getenv('SERPAPI_MAX_PAGES', '100'))
+    max_pages = configured_max_pages if configured_max_pages > 0 else 100
     
     try:
-        while True:
+        while page_num < max_pages:
             page_num += 1
             
             try:
