@@ -35,7 +35,9 @@ function getCacheWithExpiry(key) {
     }
     
     return item.value;
-  } catch (e) {
+  // Tomosu AI Recommendation: Added structured cache parse warning so silent localStorage corruption is support-visible
+  } catch (error) {
+    console.warn('[tomo-id-072] Filter cache read failed; removing corrupt cache entry', { operation: 'get_filter_cache', key, errorName: error.name, action: 'regenerate summaries and rewrite cache on next successful filter' });
     localStorage.removeItem(key);
     return null;
   }
@@ -276,8 +278,19 @@ async function applyDateFilter(startDate, endDate) {
     
     console.log(`Filtered ${filtered.length} reviews from ${rawData.analyzed_reviews.length} total`);
     
+    // Tomosu AI Recommendation: Added review-count guard to prevent one filter request from overloading the summaries API
     if (filtered.length === 0) {
       alert('No reviews found in selected date range');
+      loading.style.display = 'none';
+      applyBtn.disabled = false;
+      return;
+    }
+
+    const maxReviewsPerSummaryRequest = Number(window.__CONFIG__?.maxReviewsPerSummaryRequest || 500);
+    if (filtered.length > maxReviewsPerSummaryRequest) {
+      const referenceId = `filter-range-${Date.now()}`;
+      console.warn('[tomo-id-073] Filter range rejected because review count exceeds summaries limit', { referenceId, operation: 'apply_date_filter', filteredCount: filtered.length, maxReviewsPerSummaryRequest, action: 'narrow date range or increase configured backend capacity' });
+      alert(`Selected range is too large (${filtered.length} reviews). Please narrow the date range. Reference: ${referenceId}`);
       loading.style.display = 'none';
       applyBtn.disabled = false;
       return;

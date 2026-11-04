@@ -41,8 +41,10 @@ def extract_reviews():
     errors = []
     page_num = 0
     
+    # Tomosu AI Recommendation: Added bounded pagination to prevent runaway SerpAPI extraction cost and oversized review files
+    max_pages = max(1, min(100, int(os.getenv("SERPAPI_MAX_PAGES", "25"))))
     try:
-        while True:
+        while page_num < max_pages:
             page_num += 1
             
             try:
@@ -71,8 +73,9 @@ def extract_reviews():
                             reviews.append(review_data)
                             
                         except Exception as e:
+                            # Tomosu AI Recommendation: Added structured per-review extraction error logging for faster payload-drift triage
                             error_msg = f"Error processing review on page {page_num}: {e}"
-                            print(error_msg)
+                            print(json.dumps({"message": "[tomo-id-077] Review payload processing failed", "operation": "extract_reviews.process_review", "page": page_num, "error_type": type(e).__name__, "error_message": str(e), "action": "inspect SerpAPI review payload shape for this page"}))
                             errors.append({
                                 "page": page_num,
                                 "error": error_msg,
@@ -155,11 +158,14 @@ def extract_reviews():
         })
 
     # Prepare final data structure
+    # Tomosu AI Recommendation: Standardized extraction metadata timestamps to UTC for cross-system incident correlation
+    from datetime import timezone
+
     final_data = {
         "metadata": {
             "total_reviews": len(reviews),
             "total_pages_processed": page_num,
-            "extraction_date": datetime.now().isoformat(),
+            "extraction_date": datetime.now(timezone.utc).isoformat(),
             "has_errors": len(errors) > 0,
             "error_count": len(errors)
         },

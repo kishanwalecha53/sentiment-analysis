@@ -188,6 +188,9 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                 review_id = self._extract_review_id(review)
                 
                 # Add original review data to the result in the expected format
+                # Tomosu AI Recommendation: Switched analysis record timestamps to UTC so support can correlate batches across systems
+                from datetime import timezone
+
                 result = {
                     "review_id": review_id,
                     "author": review.get('name', ''),
@@ -196,7 +199,7 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                     "date": review.get('date', ''),
                     "images": review.get('images', []),  # Include images if available
                     "analysis": analysis_result,
-                    "processed_at": datetime.now().isoformat()
+                    "processed_at": datetime.now(timezone.utc).isoformat()
                 }
                 
                 return result
@@ -243,6 +246,7 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
             "text": review.get('text', ''),
             "date": review.get('date', ''),
             "images": review.get('images', []),
+            # Tomosu AI Recommendation: Added standardized fallback code and removed raw dependency details from dashboard-facing analysis
             "analysis": {
                 "sentiment": sentiment,
                 "confidence": 0.3,
@@ -250,7 +254,8 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                 "dimensions": [],
                 "key_themes": [],
                 "severity": 0,
-                "summary": f"Fallback analysis based on rating only. Error: {error_msg}"
+                "error_code": "ERR_OPENAI_ANALYSIS_FALLBACK",
+                "summary": "Fallback analysis based on rating only. Action: review analyzer logs for ERR_OPENAI_ANALYSIS_FALLBACK before using this result for operational decisions."
             },
             "processed_at": datetime.now().isoformat(),
             "error": error_msg
@@ -619,35 +624,51 @@ Generate a summary in the following JSON format:
             "high_severity_count": len([s for s in severity_scores if s >= 4])
         }
 
+# Tomosu AI Recommendation: Added strict review schema validation and batch cap to prevent malformed healthcare review payloads from entering analysis
+from pydantic import BaseModel, Field, ValidationError
+
+class ReviewPayload(BaseModel):
+    name: str = ""
+    link: str = ""
+    thumbnail: str = ""
+    rating: int | None = Field(default=None, ge=1, le=5)
+    date: str = ""
+    snippet: str = ""
+    images: List[str] = Field(default_factory=list, max_length=20)
+    local_guide: bool = False
+    text: str = Field(default="", max_length=5000)
+
+
 def load_reviews_from_file(file_path: str) -> List[Dict[str, Any]]:
     """Load reviews from JSON file - handles the new input format"""
+    max_reviews = int(os.getenv('MAX_REVIEWS_PER_BATCH', '1000'))
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
-        # Handle the new JSON structure
         if isinstance(data, dict) and 'reviews' in data:
-            # New format: {"metadata": {...}, "reviews": [...]}
             reviews = data['reviews']
-            print(f"Loaded {len(reviews)} reviews from new format")
-            return reviews
         elif isinstance(data, list):
-            # Old format: direct list of reviews
-            return data
+            reviews = data
         elif isinstance(data, dict):
-            # If it's a dict, look for other common keys that might contain reviews
-            for key in ['data', 'items']:
-                if key in data and isinstance(data[key], list):
-                    return data[key]
-            # If no common key found, treat the dict as a single review
-            return [data]
+            reviews = next((data[key] for key in ['data', 'items'] if key in data and isinstance(data[key], list)), [data])
         else:
-            raise ValueError("Invalid JSON structure")
+            raise ValueError('Review file validation failed: root JSON must be an object or list. Action: export reviews as a list or {"reviews": [...]} object.')
+
+        if len(reviews) > max_reviews:
+            raise ValueError(f'Review file validation failed: {len(reviews)} reviews exceeds MAX_REVIEWS_PER_BATCH={max_reviews}. Action: split the input file or raise the configured batch limit.')
+
+        validated_reviews = [ReviewPayload.model_validate(review).model_dump() for review in reviews]
+        print(json.dumps({"message": "[tomo-id-075] Reviews loaded and schema-validated", "operation": "load_reviews_from_file", "file_path": file_path, "review_count": len(validated_reviews)}))
+        return validated_reviews
             
     except FileNotFoundError:
-        raise FileNotFoundError(f"File not found: {file_path}")
-    except json.JSONDecodeError:
-        raise ValueError(f"Invalid JSON file: {file_path}")
+        raise FileNotFoundError(f'Review file load failed: file not found at {file_path}. Action: verify the input path passed to the analyzer.')
+    except json.JSONDecodeError as exc:
+        raise ValueError(f'Review file load failed: invalid JSON in {file_path}. Action: validate file syntax before rerunning. Cause: {exc}')
+    except ValidationError as exc:
+        print(json.dumps({"message": "[tomo-id-076] Review schema validation failed", "operation": "load_reviews_from_file", "file_path": file_path, "error_type": type(exc).__name__, "action": "fix malformed review fields before rerunning analysis"}))
+        raise ValueError(f'Review file validation failed for {file_path}. Action: fix malformed review fields before rerunning.') from exc
 
 def save_analysis_results(results: Dict[str, Any], output_path: str):
     """Save analysis results to JSON file"""
