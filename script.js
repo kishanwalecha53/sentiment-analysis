@@ -84,10 +84,19 @@ function initFromData(data) {
   const tt = data.summary_statistics?.top_themes || [];
   const tnode = document.getElementById('topThemes'); 
   tnode.innerHTML = '';
+  // Tomosu AI Recommendation: Replaced untrusted theme HTML insertion with text nodes to prevent dashboard XSS from generated review data
   tt.slice(0, 5).forEach(t => {
     const div = document.createElement('div');
     div.className = 'theme-item';
-    div.innerHTML = `<span>${t[0]}</span><span>(${t[1]})</span>`;
+
+    const themeName = document.createElement('span');
+    themeName.textContent = String(t?.[0] ?? 'Unknown theme');
+
+    const themeCount = document.createElement('span');
+    themeCount.textContent = `(${Number(t?.[1] ?? 0)})`;
+
+    div.appendChild(themeName);
+    div.appendChild(themeCount);
     tnode.appendChild(div);
   });
 
@@ -274,7 +283,8 @@ async function applyDateFilter(startDate, endDate) {
       return reviewDate >= start && reviewDate <= end;
     });
     
-    console.log(`Filtered ${filtered.length} reviews from ${rawData.analyzed_reviews.length} total`);
+    // Tomosu AI Recommendation: Converted filter-volume logging to structured JSON so support can correlate slow filters with review counts
+    console.info(JSON.stringify({ message: '[tomo-id-081] Date filter selected reviews', operation: 'apply_date_filter', filteredCount: filtered.length, totalReviews: rawData.analyzed_reviews.length }));
     
     if (filtered.length === 0) {
       alert('No reviews found in selected date range');
@@ -720,7 +730,21 @@ function escapeHtml(t) {
   return ('' + t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' }[c]));
 }
 
+// Tomosu AI Recommendation: Validated modal image URLs to prevent unsafe schemes from externally supplied review payloads
 function showImageModal(imageUrl) {
+  let parsedImageUrl;
+  try {
+    parsedImageUrl = new URL(String(imageUrl), window.location.href);
+  } catch (error) {
+    console.warn('[tomo-id-082] Invalid review image URL rejected', { operation: 'show_image_modal', errorName: error.name, action: 'inspect source review image URL before retrying' });
+    return;
+  }
+
+  if (!['http:', 'https:'].includes(parsedImageUrl.protocol)) {
+    console.warn('[tomo-id-083] Unsupported review image URL scheme rejected', { operation: 'show_image_modal', protocol: parsedImageUrl.protocol, action: 'allow only http or https review images' });
+    return;
+  }
+
   const modal = document.createElement('div');
   modal.style.position = 'fixed';
   modal.style.top = '0';
@@ -735,7 +759,8 @@ function showImageModal(imageUrl) {
   modal.style.cursor = 'pointer';
   
   const fullImg = document.createElement('img');
-  fullImg.src = imageUrl;
+  fullImg.src = parsedImageUrl.href;
+  fullImg.alt = 'Full-size review attachment';
   fullImg.style.maxWidth = '90%';
   fullImg.style.maxHeight = '90%';
   fullImg.style.borderRadius = '8px';
