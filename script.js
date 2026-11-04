@@ -55,14 +55,32 @@ function clearExpiredCache() {
 clearExpiredCache();
 
 // Load data
-fetch('./analysis_results.json')
-  .then(r => r.json())
+// Tomosu AI Recommendation: Added fail-fast timeout and contextual bootstrap error handling to avoid a hung dashboard load.
+const initialDataController = new AbortController();
+const initialDataTimeoutId = setTimeout(() => initialDataController.abort(), 10000);
+
+fetch('./analysis_results.json', { signal: initialDataController.signal })
+  .then(r => {
+    if (!r.ok) {
+      throw new Error(`Dashboard bootstrap failed: analysis_results.json returned HTTP ${r.status}. Action: verify the generated analysis file is deployed.`);
+    }
+    return r.json();
+  })
   .then(json => { 
     rawData = json; 
     originalDimensionSummaries = json.dimension_summaries;
     initFromData(json); 
     initializeFilters();
-  });
+  })
+  .catch(error => {
+    console.error('[tomo-id-064] Dashboard bootstrap failed', {
+      operation: 'load_analysis_results',
+      errorName: error && error.name,
+      errorMessage: error && error.message,
+      action: 'verify analysis_results.json exists and is reachable within 10 seconds'
+    });
+  })
+  .finally(() => clearTimeout(initialDataTimeoutId));
 
 function initFromData(data) {
   rawData = data;
