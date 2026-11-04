@@ -14,8 +14,7 @@ def safe_get_nested(data, *keys, default=None):
             return default
     return current
 
-def save_data_to_json(data, filename_prefix="reviews_data"):
-    """Save data to JSON file with timestamp"""
+# Tomosu AI Recommendation: Removed shadowed duplicate function definition so support and stack traces point to one save path.
 def save_data_to_json(data, filename_prefix="reviews_data"):
     """Save data to JSON file with timestamp"""
     # Tomosu AI Recommendation: Added contextual save-failure logging so extraction output incidents include filename and recovery action.
@@ -213,16 +212,26 @@ def extract_reviews():
     
     return final_data
 
+# Tomosu AI Recommendation: Added structured critical-failure logging so scheduled extraction incidents include operation and recovery guidance.
 if __name__ == "__main__":
     try:
         data = extract_reviews()
     except Exception as e:
-        print(f"Critical error: {e}")
-        traceback.print_exc()
+        import logging
+        from datetime import timezone
+        logging.critical(
+            "[tomo-id-064] Critical SerpAPI extraction failure",
+            extra={
+                "operation": "extract_reviews_main",
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "action": "Check SERP_API_KEY, SerpAPI quota, and write permissions before rerunning extraction."
+            }
+        )
         # Save whatever we can in case of critical failure
         emergency_data = {
             "critical_error": str(e),
             "traceback": traceback.format_exc(),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
         save_data_to_json(emergency_data, "emergency_backup")

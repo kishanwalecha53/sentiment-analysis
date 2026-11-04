@@ -10,12 +10,33 @@ const dimensions = ['Service Quality', 'Facility Experience', 'Trust & Safety', 
 // Cache management with expiration
 const CACHE_DURATION = 12 * 60 * 60 * 1000; // 12 hours in milliseconds
 
+// Tomosu AI Recommendation: Added cache size and quota guards so browser storage exhaustion does not trigger repeated expensive regeneration.
 function setCacheWithExpiry(key, value) {
   const item = {
     value: value,
     expiry: Date.now() + CACHE_DURATION
   };
-  localStorage.setItem(key, JSON.stringify(item));
+  const serializedItem = JSON.stringify(item);
+  const maxCacheEntryBytes = 2 * 1024 * 1024;
+  if (new Blob([serializedItem]).size > maxCacheEntryBytes) {
+    console.warn('[tomo-id-061] Cache entry skipped because it exceeded safe browser storage size', {
+      operation: 'setCacheWithExpiry',
+      cacheKey: key,
+      maxCacheEntryBytes,
+      action: 'Narrow the date filter or reduce summary payload size before caching.'
+    });
+    return;
+  }
+  try {
+    localStorage.setItem(key, serializedItem);
+  } catch (error) {
+    console.warn('[tomo-id-062] Cache write failed; continuing without cached summaries', {
+      operation: 'setCacheWithExpiry',
+      cacheKey: key,
+      errorName: error && error.name,
+      action: 'Clear browser storage or narrow date range if this repeats.'
+    });
+  }
 }
 
 // Tomosu AI Recommendation: Logged corrupt cache entries before fallback so support can diagnose silent localStorage degradation.
@@ -72,7 +93,13 @@ fetch('./analysis_results.json', { signal: analysisResultsController.signal })
     }
     return r.json();
   })
+  // Tomosu AI Recommendation: Validated dashboard payload before state mutation to prevent malformed analysis files from crashing the UI.
   .then(json => { 
+    const requiredObjectFields = ['metadata', 'summary_statistics', 'sentiment_summaries', 'dimension_summaries'];
+    const missingField = requiredObjectFields.find(field => !json || typeof json[field] !== 'object' || Array.isArray(json[field]));
+    if (missingField || !Array.isArray(json.analyzed_reviews)) {
+      throw new Error(`analysis_results.json schema validation failed: invalid ${missingField || 'analyzed_reviews'}. Action: regenerate analysis results with scripts/main.py.`);
+    }
     rawData = json; 
     originalDimensionSummaries = json.dimension_summaries;
     initFromData(json); 
@@ -404,9 +431,19 @@ async function applyDateFilter(startDate, endDate) {
     renderDimensionButtons();
     refreshInsights();
     
+  // Tomosu AI Recommendation: Added reference ID and structured context so support can correlate filter failures to browser logs.
   } catch (error) {
-    console.error('Filter error:', error);
-    alert(`Error applying filter: ${error.message}`);
+    const referenceId = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') ? crypto.randomUUID() : `filter-error-${Date.now()}`;
+    console.error('[tomo-id-060] Date filter application failed', {
+      operation: 'applyDateFilter',
+      referenceId,
+      startDate,
+      endDate,
+      errorName: error && error.name,
+      errorMessage: error && error.message,
+      action: 'Use the referenceId to correlate this browser failure and check summary-generation API availability.'
+    });
+    alert(`Error applying filter. Reference: ${referenceId}. ${error.message}`);
   } finally {
     // Keep loader visible for at least 600ms to avoid flashing
     const elapsed = Date.now() - (typeof loaderShownAt !== 'undefined' ? loaderShownAt : Date.now());
@@ -462,6 +499,7 @@ function getDimensionCounts(sentiment) {
   return counts;
 }
 
+// Tomosu AI Recommendation: Restored dimension-button rendering so the dashboard initializes reliably without undefined review-media variables.
 function renderDimensionButtons() {
   const db = document.getElementById('dimensionButtons'); 
   db.innerHTML = '';
@@ -470,24 +508,16 @@ function renderDimensionButtons() {
   dimensions.forEach(dim => {
     const btn = document.createElement('button');
     btn.className = 'dim-btn' + (dim === selectedDimension ? ' active' : '');
-    btn.innerHTML = `${dim} <span style="font-size: 16px;">(${dimensionCounts[dim]})</span>`;
-    
-      // Tomosu AI Recommendation: Escaped review image URLs before HTML insertion to prevent patient review media from becoming an XSS vector.
-      images.forEach((imageUrl, index) => {
-        const safeImageUrl = escapeHtml(imageUrl);
-        const modalImageUrl = encodeURIComponent(imageUrl);
-        reviewContent += `
-          <div style="position: relative; cursor: pointer;">
-            <img src="${safeImageUrl}" 
-                 style="width: 80px; height: 80px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;" 
-                 alt="Review image ${index + 1}"
-                 onmouseover="this.style.transform='scale(1.05)'"
-                 onmouseout="this.style.transform='scale(1)'"
-                 onclick="showImageModal(decodeURIComponent('${modalImageUrl}'))"
-                 onerror="this.parentElement.innerHTML='<div style=\'width: 80px; height: 80px; background: #f3f4f6; border: 1px solid #e2e8f0; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #9ca3af;\'>Image unavailable</div>'">
-          </div>
-        `;
-      });
+    btn.innerHTML = `${escapeHtml(dim)} <span style="font-size: 16px;">(${dimensionCounts[dim]})</span>`;
+    btn.addEventListener('click', () => {
+      selectedDimension = dim;
+      document.getElementById('selectedDimension').innerText = selectedDimension;
+      renderDimensionButtons();
+      refreshInsights();
+    });
+    db.appendChild(btn);
+  });
+}
 // Update sentiment card counts based on current reviews
 function updateSentimentCounts() {
   const reviews = getCurrentReviews();
@@ -625,15 +655,18 @@ function refreshInsights() {
           <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px;">
       `;
 
+      // Tomosu AI Recommendation: Escaped review image URLs before HTML insertion to prevent patient review media from becoming an XSS vector.
       images.forEach((imageUrl, index) => {
+        const safeImageUrl = escapeHtml(imageUrl);
+        const modalImageUrl = encodeURIComponent(imageUrl);
         reviewContent += `
           <div style="position: relative; cursor: pointer;">
-            <img src="${imageUrl}" 
+            <img src="${safeImageUrl}" 
                  style="width: 80px; height: 80px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;" 
                  alt="Review image ${index + 1}"
                  onmouseover="this.style.transform='scale(1.05)'"
                  onmouseout="this.style.transform='scale(1)'"
-                 onclick="showImageModal('${imageUrl}')"
+                 onclick="showImageModal(decodeURIComponent('${modalImageUrl}'))"
                  onerror="this.parentElement.innerHTML='<div style=\\'width: 80px; height: 80px; background: #f3f4f6; border: 1px solid #e2e8f0; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #9ca3af;\\'>Image unavailable</div>'">
           </div>
         `;

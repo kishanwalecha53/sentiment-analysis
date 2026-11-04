@@ -413,10 +413,21 @@ Generate a summary in the following JSON format:
                 
                 summaries[sentiment_type] = summary_result
                 
+            # Tomosu AI Recommendation: Added structured summary-generation failure logging so OpenAI incidents are separable by operation and sentiment.
             except Exception as e:
-                print(f"Error generating {sentiment_type} summary: {e}")
+                import logging
+                logging.error(
+                    "[tomo-id-063] OpenAI sentiment summary generation failed",
+                    extra={
+                        "operation": "generate_sentiment_summaries",
+                        "sentiment_type": sentiment_type,
+                        "review_count": len(filtered_reviews),
+                        "error_type": type(e).__name__,
+                        "action": "Check OpenAI availability and rerun summary generation for the affected sentiment only."
+                    }
+                )
                 summaries[sentiment_type] = {
-                    "summary": f"Error generating {sentiment_type} summary: {str(e)}",
+                    "summary": f"ERR_OPENAI_SUMMARY_FAILED: Error generating {sentiment_type} summary. Action: manually review extracted insights or rerun after OpenAI recovery.",
                     "key_insights": [f"Analysis failed for {len(filtered_reviews)} {sentiment_type} reviews"],
                     "recommendations": ["Manual review recommended due to analysis failure"]
                 }
@@ -578,11 +589,12 @@ Generate a summary in the following JSON format:
         
         # Create final output structure
         output = {
+            # Tomosu AI Recommendation: Wrote analysis metadata in UTC so report freshness is comparable across environments.
             "metadata": {
                 "total_reviews": len(reviews),
                 "successfully_analyzed": len(analyzed_reviews) - failed_count,
                 "failed_analyses": failed_count,
-                "analysis_date": datetime.now().isoformat(),
+                "analysis_date": datetime.now(datetime.utcnow().astimezone().tzinfo).astimezone().isoformat(),
                 "processing_time_per_review": rate_limit_delay
             },
             "summary_statistics": summary_stats,
@@ -669,35 +681,46 @@ Generate a summary in the following JSON format:
             "high_severity_count": len([s for s in severity_scores if s >= 4])
         }
 
+# Tomosu AI Recommendation: Added Pydantic validation at the review-file boundary so malformed external payloads fail before OpenAI processing.
 def load_reviews_from_file(file_path: str) -> List[Dict[str, Any]]:
     """Load reviews from JSON file - handles the new input format"""
+    from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+    class ReviewInput(BaseModel):
+        model_config = ConfigDict(extra='allow')
+        name: str = ''
+        link: str = ''
+        rating: Any = Field(default=None)
+        date: str = ''
+        snippet: str = ''
+        images: List[str] = Field(default_factory=list)
+        text: str = ''
+
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
-        # Handle the new JSON structure
         if isinstance(data, dict) and 'reviews' in data:
-            # New format: {"metadata": {...}, "reviews": [...]}
             reviews = data['reviews']
-            print(f"Loaded {len(reviews)} reviews from new format")
-            return reviews
         elif isinstance(data, list):
-            # Old format: direct list of reviews
-            return data
+            reviews = data
         elif isinstance(data, dict):
-            # If it's a dict, look for other common keys that might contain reviews
-            for key in ['data', 'items']:
-                if key in data and isinstance(data[key], list):
-                    return data[key]
-            # If no common key found, treat the dict as a single review
-            return [data]
+            reviews = next((data[key] for key in ['data', 'items'] if key in data and isinstance(data[key], list)), [data])
         else:
-            raise ValueError("Invalid JSON structure")
+            raise ValueError(f"Invalid JSON structure in {file_path}: expected list or object with reviews. Action: verify extractor output format.")
+
+        try:
+            validated_reviews = [ReviewInput.model_validate(review).model_dump() for review in reviews]
+        except ValidationError as exc:
+            raise ValueError(f"Review payload validation failed for {file_path}: {exc}. Action: regenerate or sanitize the review export before analysis.") from exc
+
+        print(f"Loaded {len(validated_reviews)} validated reviews")
+        return validated_reviews
             
     except FileNotFoundError:
-        raise FileNotFoundError(f"File not found: {file_path}")
-    except json.JSONDecodeError:
-        raise ValueError(f"Invalid JSON file: {file_path}")
+        raise FileNotFoundError(f"File not found: {file_path}. Action: provide an existing SerpAPI extraction output file.")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON file: {file_path}. Action: confirm the extraction completed and wrote valid JSON.") from exc
 
 def save_analysis_results(results: Dict[str, Any], output_path: str):
     """Save analysis results to JSON file"""
@@ -717,10 +740,13 @@ def main():
     args = parser.parse_args()
     
     # Get API key
+    # Tomosu AI Recommendation: Fail fast with an actionable configuration error so schedulers detect missing OpenAI credentials.
     api_key = args.api_key or os.getenv('OPENAI_API_KEY')
     if not api_key:
-        print("Error: OpenAI API key is required. Set OPENAI_API_KEY environment variable or use -k flag.")
-        return
+        raise SystemExit(
+            "ERR_OPENAI_API_KEY_MISSING: OpenAI API key is required for review sentiment analysis. "
+            "Action: set OPENAI_API_KEY or pass --api-key from the approved secret store."
+        )
     
     try:
         # Load reviews
