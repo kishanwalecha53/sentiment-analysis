@@ -1,3 +1,4 @@
+// Tomosu AI Recommendation: Centralized operational constants to reduce config drift and simplify incident-time tuning
 let rawData = null;
 let originalDimensionSummaries = null;
 let tempDimensionSummaries = null;
@@ -5,10 +6,18 @@ let filteredReviewsData = null;
 let selectedSentiment = 'positive';
 let selectedDimension = 'Service Quality';
 let isFilterActive = false;
-const dimensions = ['Service Quality', 'Facility Experience', 'Trust & Safety', 'Clinical Care', 'Operations'];
+const APP_CONFIG = Object.freeze({
+  dimensions: Object.freeze(['Service Quality', 'Facility Experience', 'Trust & Safety', 'Clinical Care', 'Operations']),
+  cacheDurationMs: 12 * 60 * 60 * 1000,
+  summaryApiUrl: 'https://psmmc-back.vercel.app/api/generate_summaries',
+  summaryTimeoutMs: 90000,
+  maxRenderedReviews: 50,
+  maxRenderedImagesPerReview: 12
+});
+const dimensions = APP_CONFIG.dimensions;
 
 // Cache management with expiration
-const CACHE_DURATION = 12 * 60 * 60 * 1000; // 12 hours in milliseconds
+const CACHE_DURATION = APP_CONFIG.cacheDurationMs; // 12 hours in milliseconds
 
 function setCacheWithExpiry(key, value) {
   const item = {
