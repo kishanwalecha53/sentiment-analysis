@@ -17,8 +17,9 @@ def chunk_list(lst, chunk_size):
 
 class ReviewSentimentAnalyzer:
     def __init__(self, openai_api_key: str):
+        # Tomosu AI Recommendation: Added explicit OpenAI timeout to prevent one stalled AI call from hanging the whole batch.
         """Initialize the analyzer with OpenAI API key"""
-        self.client = openai.OpenAI(api_key=openai_api_key)
+        self.client = openai.OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=0)
         
         # Define sentiment analysis dimensions
         self.analysis_dimensions = [
@@ -148,9 +149,11 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
         for attempt in range(retry_count + 1):
             try:
                 # Add exponential backoff for retries
+                # Tomosu AI Recommendation: Added jitter to retry backoff to reduce synchronized retry storms during OpenAI degradation.
                 if attempt > 0:
-                    wait_time = (2 ** attempt) + 1
-                    print(f"  Retrying in {wait_time} seconds... (attempt {attempt + 1})")
+                    jitter_seconds = __import__('random').uniform(0.1, 0.75)
+                    wait_time = min((2 ** attempt) + 1 + jitter_seconds, 10.0)
+                    print(f"[tomo-id-066] Retrying OpenAI review analysis in {wait_time:.2f} seconds", {"attempt": attempt + 1, "max_attempts": retry_count + 1})
                     time.sleep(wait_time)
                 
                 response = self.client.chat.completions.create(
@@ -196,7 +199,8 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                     "date": review.get('date', ''),
                     "images": review.get('images', []),  # Include images if available
                     "analysis": analysis_result,
-                    "processed_at": datetime.now().isoformat()
+                    # Tomosu AI Recommendation: Use UTC timestamps so review processing events correlate consistently across environments.
+                    "processed_at": datetime.now(__import__('datetime').timezone.utc).isoformat()
                 }
                 
                 return result
@@ -737,8 +741,10 @@ def main():
         
         print(f"\nResults saved to: {args.output}")
         
+    # Tomosu AI Recommendation: Added actionable top-level failure context with a reference ID for faster support triage.
     except Exception as e:
-        print(f"Error: {e}")
+        reference_id = f"analysis-{__import__('uuid').uuid4()}"
+        print(f"[tomo-id-067] Sentiment analysis job failed", {"reference_id": reference_id, "error_type": type(e).__name__, "error_message": str(e), "action": "verify input JSON, OpenAI API key, and network connectivity before retrying"})
 
 if __name__ == "__main__":
     main()

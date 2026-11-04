@@ -35,7 +35,14 @@ function getCacheWithExpiry(key) {
     }
     
     return item.value;
+  // Tomosu AI Recommendation: Log corrupt cache eviction so support can distinguish cache misses from cache failures.
   } catch (e) {
+    console.warn('[tomo-id-065] Cache entry could not be parsed; evicting and falling back to recomputation', {
+      operation: 'get_filter_cache',
+      cacheKey: key,
+      errorName: e && e.name,
+      action: 'cache entry removed; regenerate summaries if needed'
+    });
     localStorage.removeItem(key);
     return null;
   }
@@ -55,14 +62,32 @@ function clearExpiredCache() {
 clearExpiredCache();
 
 // Load data
-fetch('./analysis_results.json')
-  .then(r => r.json())
+// Tomosu AI Recommendation: Added fail-fast timeout and contextual bootstrap error handling to avoid a hung dashboard load.
+const initialDataController = new AbortController();
+const initialDataTimeoutId = setTimeout(() => initialDataController.abort(), 10000);
+
+fetch('./analysis_results.json', { signal: initialDataController.signal })
+  .then(r => {
+    if (!r.ok) {
+      throw new Error(`Dashboard bootstrap failed: analysis_results.json returned HTTP ${r.status}. Action: verify the generated analysis file is deployed.`);
+    }
+    return r.json();
+  })
   .then(json => { 
     rawData = json; 
     originalDimensionSummaries = json.dimension_summaries;
     initFromData(json); 
     initializeFilters();
-  });
+  })
+  .catch(error => {
+    console.error('[tomo-id-064] Dashboard bootstrap failed', {
+      operation: 'load_analysis_results',
+      errorName: error && error.name,
+      errorMessage: error && error.message,
+      action: 'verify analysis_results.json exists and is reachable within 10 seconds'
+    });
+  })
+  .finally(() => clearTimeout(initialDataTimeoutId));
 
 function initFromData(data) {
   rawData = data;
@@ -295,16 +320,21 @@ async function applyDateFilter(startDate, endDate) {
       tempDimensionSummaries = cached;
     } else {
       console.log('Calling API to generate summaries...');
+      // Tomosu AI Recommendation: Externalized summary API settings and added correlation header for safer operations and downstream tracing.
       const controller = new AbortController();
-      const timeoutMs = 90000; // 90 seconds
+      const configuredTimeoutMs = Number(window.PSMMC_SUMMARY_TIMEOUT_MS ?? 90000);
+      const timeoutMs = Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0 ? configuredTimeoutMs : 90000;
+      const summaryApiUrl = window.PSMMC_SUMMARY_API_URL || 'https://psmmc-back.vercel.app/api/generate_summaries';
+      const correlationId = `filter-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       let response;
       try {
-        response = await fetch('https://psmmc-back.vercel.app/api/generate_summaries', {
+        response = await fetch(summaryApiUrl, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'x-request-id': correlationId
           },
           body: JSON.stringify({
             reviews: filtered
@@ -571,15 +601,18 @@ function refreshInsights() {
           <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px;">
       `;
 
+      // Tomosu AI Recommendation: Escape review image URLs before HTML insertion to reduce dashboard XSS exposure from external review payloads.
       images.forEach((imageUrl, index) => {
+        const safeImageUrl = escapeHtml(String(imageUrl || ''));
+        const modalImageArg = JSON.stringify(String(imageUrl || '')).replace(/"/g, '&quot;');
         reviewContent += `
           <div style="position: relative; cursor: pointer;">
-            <img src="${imageUrl}" 
+            <img src="${safeImageUrl}" 
                  style="width: 80px; height: 80px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;" 
                  alt="Review image ${index + 1}"
                  onmouseover="this.style.transform='scale(1.05)'"
                  onmouseout="this.style.transform='scale(1)'"
-                 onclick="showImageModal('${imageUrl}')"
+                 onclick="showImageModal(${modalImageArg})"
                  onerror="this.parentElement.innerHTML='<div style=\\'width: 80px; height: 80px; background: #f3f4f6; border: 1px solid #e2e8f0; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #9ca3af;\\'>Image unavailable</div>'">
           </div>
         `;
