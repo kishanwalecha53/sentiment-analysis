@@ -16,9 +16,11 @@ def chunk_list(lst, chunk_size):
 
 
 class ReviewSentimentAnalyzer:
+    # Tomosu AI Recommendation: Added explicit OpenAI timeout to prevent stalled vendor calls from hanging batch analysis.
     def __init__(self, openai_api_key: str):
         """Initialize the analyzer with OpenAI API key"""
-        self.client = openai.OpenAI(api_key=openai_api_key)
+        openai_timeout_seconds = float(os.getenv('OPENAI_TIMEOUT_SECONDS', '30'))
+        self.client = openai.OpenAI(api_key=openai_api_key, timeout=openai_timeout_seconds, max_retries=0)
         
         # Define sentiment analysis dimensions
         self.analysis_dimensions = [
@@ -80,7 +82,10 @@ class ReviewSentimentAnalyzer:
     def analyze_single_review(self, review: Dict[str, Any], retry_count: int = 2) -> Dict[str, Any]:
         """Analyze sentiment for a single review with retry logic"""
         
+        # Tomosu AI Recommendation: Redacted direct identifiers before AI analysis to reduce healthcare review PHI exposure.
         review_text = review.get('text', '')
+        review_text = re.sub(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', '[REDACTED_EMAIL]', review_text)
+        review_text = re.sub(r'(?<!\d)(?:\+?\d[\d\s().-]{7,}\d)(?!\d)', '[REDACTED_PHONE]', review_text)
         rating = review.get('rating', 0)
         
         # Check if the text appears to be in Arabic
@@ -147,10 +152,21 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
 
         for attempt in range(retry_count + 1):
             try:
+                # Tomosu AI Recommendation: Added jittered retry logging to reduce synchronized OpenAI retry storms and improve incident triage.
                 # Add exponential backoff for retries
                 if attempt > 0:
-                    wait_time = (2 ** attempt) + 1
-                    print(f"  Retrying in {wait_time} seconds... (attempt {attempt + 1})")
+                    import logging
+                    import random
+                    wait_time = min((2 ** attempt) + random.uniform(0.25, 1.25), 30)
+                    logging.getLogger(__name__).warning(
+                        "[tomo-id-067] Retrying OpenAI review analysis after transient failure",
+                        extra={
+                            "operation": "analyze_single_review",
+                            "attempt": attempt + 1,
+                            "wait_seconds": round(wait_time, 2),
+                            "action": "retry with jittered exponential backoff"
+                        }
+                    )
                     time.sleep(wait_time)
                 
                 response = self.client.chat.completions.create(
@@ -619,35 +635,52 @@ Generate a summary in the following JSON format:
             "high_severity_count": len([s for s in severity_scores if s >= 4])
         }
 
+# Tomosu AI Recommendation: Added Pydantic validation at the file boundary to prevent malformed review payloads from entering analysis.
 def load_reviews_from_file(file_path: str) -> List[Dict[str, Any]]:
     """Load reviews from JSON file - handles the new input format"""
+    from pydantic import BaseModel, Field, ValidationError
+
+    class ReviewPayload(BaseModel):
+        name: str = ""
+        link: str = ""
+        thumbnail: str = ""
+        rating: int | None = Field(default=None, ge=1, le=5)
+        date: str = ""
+        snippet: str = ""
+        images: List[Any] = Field(default_factory=list)
+        local_guide: bool = False
+        text: str = ""
+
+    def validate_reviews(raw_reviews: Any) -> List[Dict[str, Any]]:
+        if not isinstance(raw_reviews, list):
+            raise ValueError("ERR_REVIEW_PAYLOAD_INVALID: expected reviews to be a list. Action: regenerate the SerpAPI export.")
+        try:
+            return [ReviewPayload.model_validate(review).model_dump() for review in raw_reviews]
+        except ValidationError as exc:
+            raise ValueError(f"ERR_REVIEW_SCHEMA_INVALID: review payload failed validation. Action: inspect export schema. Details: {exc}") from exc
+
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
-        # Handle the new JSON structure
         if isinstance(data, dict) and 'reviews' in data:
-            # New format: {"metadata": {...}, "reviews": [...]}
-            reviews = data['reviews']
+            reviews = validate_reviews(data['reviews'])
             print(f"Loaded {len(reviews)} reviews from new format")
             return reviews
         elif isinstance(data, list):
-            # Old format: direct list of reviews
-            return data
+            return validate_reviews(data)
         elif isinstance(data, dict):
-            # If it's a dict, look for other common keys that might contain reviews
             for key in ['data', 'items']:
                 if key in data and isinstance(data[key], list):
-                    return data[key]
-            # If no common key found, treat the dict as a single review
-            return [data]
+                    return validate_reviews(data[key])
+            return validate_reviews([data])
         else:
-            raise ValueError("Invalid JSON structure")
+            raise ValueError("ERR_REVIEW_JSON_STRUCTURE: invalid JSON structure. Action: provide a list or object containing reviews.")
             
     except FileNotFoundError:
-        raise FileNotFoundError(f"File not found: {file_path}")
-    except json.JSONDecodeError:
-        raise ValueError(f"Invalid JSON file: {file_path}")
+        raise FileNotFoundError(f"ERR_REVIEW_FILE_NOT_FOUND: file not found: {file_path}. Action: verify input_file path.")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"ERR_REVIEW_JSON_INVALID: invalid JSON file: {file_path}. Action: validate JSON syntax.") from exc
 
 def save_analysis_results(results: Dict[str, Any], output_path: str):
     """Save analysis results to JSON file"""

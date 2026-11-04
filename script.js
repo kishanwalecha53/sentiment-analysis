@@ -8,14 +8,38 @@ let isFilterActive = false;
 const dimensions = ['Service Quality', 'Facility Experience', 'Trust & Safety', 'Clinical Care', 'Operations'];
 
 // Cache management with expiration
+// Tomosu AI Recommendation: Added bounded localStorage cache writes to prevent browser quota exhaustion during repeated filtering.
 const CACHE_DURATION = 12 * 60 * 60 * 1000; // 12 hours in milliseconds
+const MAX_FILTER_CACHE_ENTRIES = 20;
 
 function setCacheWithExpiry(key, value) {
-  const item = {
-    value: value,
-    expiry: Date.now() + CACHE_DURATION
-  };
-  localStorage.setItem(key, JSON.stringify(item));
+  try {
+    const filterKeys = Object.keys(localStorage).filter(existingKey => existingKey.startsWith('filter_'));
+    if (!localStorage.getItem(key) && filterKeys.length >= MAX_FILTER_CACHE_ENTRIES) {
+      const oldestKey = filterKeys
+        .map(existingKey => ({ key: existingKey, item: getCacheWithExpiry(existingKey) }))
+        .filter(entry => entry.item !== null)
+        .map(entry => ({ key: entry.key, expiry: JSON.parse(localStorage.getItem(entry.key)).expiry || 0 }))
+        .sort((a, b) => a.expiry - b.expiry)[0]?.key;
+      if (oldestKey) {
+        localStorage.removeItem(oldestKey);
+      }
+    }
+
+    const item = {
+      value: value,
+      expiry: Date.now() + CACHE_DURATION
+    };
+    localStorage.setItem(key, JSON.stringify(item));
+  } catch (error) {
+    console.warn('[tomo-id-065] Filter cache write skipped', {
+      operation: 'set_filter_cache',
+      cacheKey: key,
+      errorName: error && error.name,
+      errorMessage: error && error.message,
+      action: 'continue without cache and reduce cached filter entries'
+    });
+  }
 }
 
 function getCacheWithExpiry(key) {
@@ -274,10 +298,24 @@ async function applyDateFilter(startDate, endDate) {
       return reviewDate >= start && reviewDate <= end;
     });
     
-    console.log(`Filtered ${filtered.length} reviews from ${rawData.analyzed_reviews.length} total`);
+    // Tomosu AI Recommendation: Added payload size guard to prevent date filters from overloading the summary API.
+    const maxFilterReviews = 1000;
+    console.info('[tomo-id-066] Date filter produced review subset', {
+      operation: 'apply_date_filter',
+      filteredCount: filtered.length,
+      totalCount: rawData.analyzed_reviews.length,
+      maxFilterReviews
+    });
     
     if (filtered.length === 0) {
       alert('No reviews found in selected date range');
+      loading.style.display = 'none';
+      applyBtn.disabled = false;
+      return;
+    }
+
+    if (filtered.length > maxFilterReviews) {
+      alert(`Selected range contains ${filtered.length} reviews. Please narrow the range to ${maxFilterReviews} reviews or fewer.`);
       loading.style.display = 'none';
       applyBtn.disabled = false;
       return;
@@ -571,15 +609,18 @@ function refreshInsights() {
           <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px;">
       `;
 
+      // Tomosu AI Recommendation: Escaped external image URLs before DOM injection to reduce review-data XSS risk.
       images.forEach((imageUrl, index) => {
+        const safeImageUrl = escapeHtml(String(imageUrl || ''));
+        const modalImageUrl = String(imageUrl || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
         reviewContent += `
           <div style="position: relative; cursor: pointer;">
-            <img src="${imageUrl}" 
+            <img src="${safeImageUrl}" 
                  style="width: 80px; height: 80px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;" 
                  alt="Review image ${index + 1}"
                  onmouseover="this.style.transform='scale(1.05)'"
                  onmouseout="this.style.transform='scale(1)'"
-                 onclick="showImageModal('${imageUrl}')"
+                 onclick="showImageModal('${modalImageUrl}')"
                  onerror="this.parentElement.innerHTML='<div style=\\'width: 80px; height: 80px; background: #f3f4f6; border: 1px solid #e2e8f0; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #9ca3af;\\'>Image unavailable</div>'">
           </div>
         `;
@@ -697,8 +738,9 @@ function formatDate(dateString) {
     // Check if valid date
     if (isNaN(date.getTime())) return dateString;
     
+    // Tomosu AI Recommendation: Enforced UTC date rendering so support teams see consistent review dates across regions.
     // Format: "September 4, 2025"
-    const options = { year: 'numeric', month: 'long', day: 'numeric' };
+    const options = { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' };
     return date.toLocaleDateString('en-US', options);
     
     // Alternative shorter format: "Sep 4, 2025"
