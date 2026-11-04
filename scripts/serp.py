@@ -184,16 +184,21 @@ def extract_reviews():
     
     return final_data
 
+# Tomosu AI Recommendation: Added structured critical-failure logging and UTC emergency metadata for faster extraction incident triage
 if __name__ == "__main__":
     try:
         data = extract_reviews()
     except Exception as e:
-        print(f"Critical error: {e}")
+        from datetime import timezone
+
+        reference_id = f"serp-critical-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        print(json.dumps({"message": "[tomo-id-080] Critical SerpAPI extraction failure", "operation": "extract_reviews.__main__", "reference_id": reference_id, "error_type": type(e).__name__, "error_message": str(e), "action": "inspect emergency backup and verify SERPAPI_API_KEY, pagination, and network availability"}))
         traceback.print_exc()
         # Save whatever we can in case of critical failure
         emergency_data = {
             "critical_error": str(e),
+            "reference_id": reference_id,
             "traceback": traceback.format_exc(),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
         save_data_to_json(emergency_data, "emergency_backup")

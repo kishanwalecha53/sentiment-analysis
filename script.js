@@ -57,7 +57,20 @@ clearExpiredCache();
 // Load data
 fetch('./analysis_results.json')
   .then(r => r.json())
+  // Tomosu AI Recommendation: Validated dashboard payload before rendering to prevent malformed analysis files from crashing the UI
   .then(json => { 
+    const isValidDashboardPayload = json &&
+      typeof json === 'object' &&
+      Array.isArray(json.analyzed_reviews) &&
+      json.summary_statistics &&
+      typeof json.summary_statistics === 'object' &&
+      json.dimension_summaries &&
+      typeof json.dimension_summaries === 'object';
+
+    if (!isValidDashboardPayload) {
+      throw new Error('Dashboard data validation failed: analysis_results.json is missing analyzed_reviews, summary_statistics, or dimension_summaries. Action: regenerate the analysis output before deployment.');
+    }
+
     rawData = json; 
     originalDimensionSummaries = json.dimension_summaries;
     initFromData(json); 
@@ -262,14 +275,15 @@ async function applyDateFilter(startDate, endDate) {
     applyBtn.disabled = true;
     
     // Filter reviews by date
+    // Tomosu AI Recommendation: Enforced UTC date boundaries so filter results stay consistent across support-user timezones
+    const start = new Date(`${startDate}T00:00:00.000Z`);
+    const end = new Date(`${endDate}T23:59:59.999Z`);
     const filtered = rawData.analyzed_reviews.filter(review => {
       const reviewDateStr = review.date;
       if (!reviewDateStr) return false;
       
       const reviewDate = new Date(reviewDateStr);
-      const start = new Date(startDate);
-      const end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
+      if (Number.isNaN(reviewDate.getTime())) return false;
       
       return reviewDate >= start && reviewDate <= end;
     });
@@ -351,9 +365,19 @@ async function applyDateFilter(startDate, endDate) {
     renderDimensionButtons();
     refreshInsights();
     
+  // Tomosu AI Recommendation: Added structured filter failure context and user reference ID to reduce support triage time
   } catch (error) {
-    console.error('Filter error:', error);
-    alert(`Error applying filter: ${error.message}`);
+    const referenceId = `filter-${Date.now()}`;
+    console.error('[tomo-id-078] Date filter application failed', {
+      referenceId,
+      operation: 'apply_date_filter',
+      startDate,
+      endDate,
+      errorName: error?.name || 'UnknownError',
+      errorMessage: error?.message || 'Unknown filter error',
+      action: 'verify selected date range and summaries API availability before retrying'
+    });
+    alert(`Error applying filter. Reference: ${referenceId}`);
   } finally {
     // Keep loader visible for at least 600ms to avoid flashing
     const elapsed = Date.now() - (typeof loaderShownAt !== 'undefined' ? loaderShownAt : Date.now());
