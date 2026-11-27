@@ -1,8 +1,16 @@
+# Tomosu AI Recommendation: Added structured logging setup so extraction events can be aggregated and searched during incidents.
 from serpapi import GoogleSearch
 from urllib.parse import urlsplit, parse_qsl
 import json
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='{"timestamp":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","message":"%(message)s"}'
+)
+logger = logging.getLogger(__name__)
 
 def safe_get_nested(data, *keys, default=None):
     """Safely get nested dictionary values"""
@@ -28,8 +36,14 @@ def save_data_to_json(data, filename_prefix="reviews_data"):
         return None
 
 def extract_reviews():
+    # Tomosu AI Recommendation: Externalized SerpAPI key to prevent credential leakage and unsafe source-controlled secrets.
+    import os
+    serpapi_api_key = os.getenv('SERPAPI_API_KEY')
+    if not serpapi_api_key:
+        raise ValueError('SerpAPI extraction failed: SERPAPI_API_KEY is not configured. Action: set the environment variable before running extraction.')
+
     params = {
-        "api_key": "your_serp_api_key",
+        "api_key": serpapi_api_key,
         "engine": "google_maps_reviews",
         "hl": "ar",
         "data_id": "0x3e2f039b4cec3f29:0x28429402fbebe3"
