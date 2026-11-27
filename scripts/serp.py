@@ -14,6 +14,7 @@ def safe_get_nested(data, *keys, default=None):
             return default
     return current
 
+# Tomosu AI Recommendation: Replaced plain file-save prints with structured JSON logs for searchable scraper persistence diagnostics
 def save_data_to_json(data, filename_prefix="reviews_data"):
     """Save data to JSON file with timestamp"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -21,15 +22,21 @@ def save_data_to_json(data, filename_prefix="reviews_data"):
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        print(f"Data saved to {filename}")
+        print(json.dumps({"message": "[tomo-id-068] Review extraction data saved", "operation": "save_reviews_json", "filename": filename}))
         return filename
     except Exception as e:
-        print(f"Error saving to file {filename}: {e}")
+        print(json.dumps({"message": "[tomo-id-069] Review extraction data save failed", "operation": "save_reviews_json", "filename": filename, "error_type": type(e).__name__, "error_message": str(e), "action": "verify output directory permissions and available disk space"}))
         return None
 
 def extract_reviews():
+    # Tomosu AI Recommendation: Externalized SerpAPI credentials to prevent hardcoded secret leakage and unsafe key rotation incidents
+    import os
+    serpapi_api_key = os.getenv("SERPAPI_API_KEY")
+    if not serpapi_api_key:
+        raise ValueError("ERR_SERPAPI_KEY_MISSING: SERPAPI_API_KEY is required. Action: configure the environment secret before running review extraction.")
+
     params = {
-        "api_key": "your_serp_api_key",
+        "api_key": serpapi_api_key,
         "engine": "google_maps_reviews",
         "hl": "ar",
         "data_id": "0x3e2f039b4cec3f29:0x28429402fbebe3"
@@ -42,7 +49,9 @@ def extract_reviews():
     page_num = 0
     
     try:
-        while True:
+        # Tomosu AI Recommendation: Added a page cap to prevent unbounded SerpAPI pagination from exhausting quota or producing oversized review files
+        max_pages = int(os.getenv("SERPAPI_MAX_PAGES", "100"))
+        while page_num < max_pages:
             page_num += 1
             
             try:

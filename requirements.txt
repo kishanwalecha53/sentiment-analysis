@@ -20,4 +20,6 @@ starlette==0.48.0
 tqdm==4.67.1
 typing-inspection==0.4.1
 typing_extensions==4.15.0
+# Tomosu AI Recommendation: Added missing SerpAPI dependency to prevent runtime importer failures in review extraction jobs
+google-search-results==2.4.2
 uvicorn==0.37.0

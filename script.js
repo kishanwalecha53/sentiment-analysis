@@ -10,12 +10,37 @@ const dimensions = ['Service Quality', 'Facility Experience', 'Trust & Safety', 
 // Cache management with expiration
 const CACHE_DURATION = 12 * 60 * 60 * 1000; // 12 hours in milliseconds
 
+// Tomosu AI Recommendation: Added cache size guard and quota-safe handling to prevent localStorage exhaustion during large review filters
 function setCacheWithExpiry(key, value) {
   const item = {
     value: value,
     expiry: Date.now() + CACHE_DURATION
   };
-  localStorage.setItem(key, JSON.stringify(item));
+  const serializedItem = JSON.stringify(item);
+  const maxCacheItemBytes = 1024 * 1024;
+
+  if (serializedItem.length > maxCacheItemBytes) {
+    console.warn('[tomo-id-065] Filter cache item skipped because it exceeds the browser storage safety limit', {
+      operation: 'set_filter_cache',
+      key,
+      itemBytes: serializedItem.length,
+      maxCacheItemBytes,
+      action: 'reduce filtered review range or rely on uncached summaries'
+    });
+    return;
+  }
+
+  try {
+    localStorage.setItem(key, serializedItem);
+  } catch (error) {
+    console.warn('[tomo-id-066] Filter cache write failed; continuing without cached summaries', {
+      operation: 'set_filter_cache',
+      key,
+      errorName: error.name,
+      errorMessage: error.message,
+      action: 'clear browser storage if repeated cache writes fail'
+    });
+  }
 }
 
 function getCacheWithExpiry(key) {
@@ -54,15 +79,34 @@ function clearExpiredCache() {
 // Clear expired cache on page load
 clearExpiredCache();
 
+// Tomosu AI Recommendation: Added timeout and failure diagnostics so dashboard data loading fails fast instead of hanging silently
 // Load data
-fetch('./analysis_results.json')
-  .then(r => r.json())
+const analysisLoadController = new AbortController();
+const analysisLoadTimeoutId = setTimeout(() => analysisLoadController.abort(), 10000);
+
+fetch('./analysis_results.json', { signal: analysisLoadController.signal })
+  .then(r => {
+    if (!r.ok) {
+      throw new Error(`ERR_ANALYSIS_RESULTS_LOAD: failed to load analysis_results.json with HTTP ${r.status}. Action: verify the generated file exists and is served by the web host.`);
+    }
+    return r.json();
+  })
   .then(json => { 
     rawData = json; 
     originalDimensionSummaries = json.dimension_summaries;
     initFromData(json); 
     initializeFilters();
-  });
+  })
+  .catch(error => {
+    console.error('[tomo-id-064] Analysis results load failed', {
+      operation: 'load_analysis_results',
+      errorName: error.name,
+      errorMessage: error.message,
+      action: 'verify analysis_results.json generation and static hosting'
+    });
+    alert('Unable to load review analytics data. Ref: ERR_ANALYSIS_RESULTS_LOAD');
+  })
+  .finally(() => clearTimeout(analysisLoadTimeoutId));
 
 function initFromData(data) {
   rawData = data;
@@ -301,10 +345,14 @@ async function applyDateFilter(startDate, endDate) {
 
       let response;
       try {
+        // Tomosu AI Recommendation: Propagated a correlation ID to make frontend filter requests traceable in backend logs
+        const correlationId = (crypto && crypto.randomUUID) ? crypto.randomUUID() : `filter-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         response = await fetch('https://psmmc-back.vercel.app/api/generate_summaries', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'x-request-id': correlationId,
+            'correlation-id': correlationId
           },
           body: JSON.stringify({
             reviews: filtered
@@ -571,15 +619,18 @@ function refreshInsights() {
           <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px;">
       `;
 
+      // Tomosu AI Recommendation: Escaped review image URLs to prevent malformed external payloads from injecting executable HTML
       images.forEach((imageUrl, index) => {
+        const safeImageUrl = escapeHtml(imageUrl || '');
+        const modalImageArg = JSON.stringify(imageUrl || '').replace(/</g, '\\u003c');
         reviewContent += `
           <div style="position: relative; cursor: pointer;">
-            <img src="${imageUrl}" 
+            <img src="${safeImageUrl}" 
                  style="width: 80px; height: 80px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;" 
                  alt="Review image ${index + 1}"
                  onmouseover="this.style.transform='scale(1.05)'"
                  onmouseout="this.style.transform='scale(1)'"
-                 onclick="showImageModal('${imageUrl}')"
+                 onclick='showImageModal(${modalImageArg})'
                  onerror="this.parentElement.innerHTML='<div style=\\'width: 80px; height: 80px; background: #f3f4f6; border: 1px solid #e2e8f0; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #9ca3af;\\'>Image unavailable</div>'">
           </div>
         `;
