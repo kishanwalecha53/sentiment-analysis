@@ -1,8 +1,17 @@
+# Tomosu AI Recommendation: Added structured logging imports and logger setup for searchable extraction-job telemetry.
 from serpapi import GoogleSearch
 from urllib.parse import urlsplit, parse_qsl
 import json
 import traceback
-from datetime import datetime
+import os
+import logging
+import time
+import random
+from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 def safe_get_nested(data, *keys, default=None):
     """Safely get nested dictionary values"""
@@ -27,9 +36,14 @@ def save_data_to_json(data, filename_prefix="reviews_data"):
         print(f"Error saving to file {filename}: {e}")
         return None
 
-def extract_reviews():
+# Tomosu AI Recommendation: Externalized SerpApi credentials and capped extraction pages to prevent secret exposure and runaway jobs.
+def extract_reviews(max_pages=100):
+    serpapi_key = os.getenv("SERPAPI_API_KEY")
+    if not serpapi_key:
+        raise ValueError("SerpApi extraction configuration failed: SERPAPI_API_KEY is missing. Action: set the environment variable before running the extractor.")
+
     params = {
-        "api_key": "your_serp_api_key",
+        "api_key": serpapi_key,
         "engine": "google_maps_reviews",
         "hl": "ar",
         "data_id": "0x3e2f039b4cec3f29:0x28429402fbebe3"
@@ -42,12 +56,19 @@ def extract_reviews():
     page_num = 0
     
     try:
-        while True:
+        # Tomosu AI Recommendation: Added pagination safety cap to prevent runaway SerpApi extraction loops and memory growth.
+        while page_num < max_pages:
             page_num += 1
             
             try:
+                # Tomosu AI Recommendation: Added structured page-fetch logging so extraction progress is queryable during incidents.
                 results = search.get_dict()
-                print(f"Extracting reviews from page {page_num}.")
+                logger.info(json.dumps({
+                    "message": "[tomo-id-069] Extracting Google Maps reviews page",
+                    "operation": "extract_reviews",
+                    "page": page_num,
+                    "action": "monitor consecutive failures or quota errors"
+                }, ensure_ascii=False))
 
                 if "error" not in results:
                     # Process reviews for current page

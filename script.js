@@ -10,12 +10,41 @@ const dimensions = ['Service Quality', 'Facility Experience', 'Trust & Safety', 
 // Cache management with expiration
 const CACHE_DURATION = 12 * 60 * 60 * 1000; // 12 hours in milliseconds
 
+// Tomosu AI Recommendation: Bounded localStorage cache to prevent quota failures from breaking filter workflows.
 function setCacheWithExpiry(key, value) {
+  const maxFilterCacheEntries = 20;
   const item = {
     value: value,
-    expiry: Date.now() + CACHE_DURATION
+    expiry: Date.now() + CACHE_DURATION,
+    createdAt: Date.now()
   };
-  localStorage.setItem(key, JSON.stringify(item));
+
+  const filterKeys = Object.keys(localStorage).filter(cacheKey => cacheKey.startsWith('filter_'));
+  if (filterKeys.length >= maxFilterCacheEntries && !localStorage.getItem(key)) {
+    const oldestKey = filterKeys
+      .map(cacheKey => {
+        try {
+          return { key: cacheKey, createdAt: JSON.parse(localStorage.getItem(cacheKey)).createdAt || 0 };
+        } catch (error) {
+          return { key: cacheKey, createdAt: 0 };
+        }
+      })
+      .sort((a, b) => a.createdAt - b.createdAt)[0]?.key;
+    if (oldestKey) {
+      localStorage.removeItem(oldestKey);
+    }
+  }
+
+  try {
+    localStorage.setItem(key, JSON.stringify(item));
+  } catch (error) {
+    console.warn('[tomo-id-066] Filter cache write failed; continuing without cache', {
+      operation: 'set_filter_cache',
+      cacheKey: key,
+      errorType: error && error.name,
+      action: 'Clear browser storage or reduce cached date ranges'
+    });
+  }
 }
 
 function getCacheWithExpiry(key) {
@@ -54,15 +83,37 @@ function clearExpiredCache() {
 // Clear expired cache on page load
 clearExpiredCache();
 
+// Tomosu AI Recommendation: Added timeout and validation to prevent dashboard startup from hanging on a stalled data load.
 // Load data
-fetch('./analysis_results.json')
-  .then(r => r.json())
-  .then(json => { 
-    rawData = json; 
+const analysisResultsController = new AbortController();
+const analysisResultsTimeoutId = setTimeout(() => analysisResultsController.abort(), 10000);
+
+fetch('./analysis_results.json', { signal: analysisResultsController.signal })
+  .then(r => {
+    if (!r.ok) {
+      throw new Error(`Dashboard data load failed with HTTP ${r.status}. Action: verify analysis_results.json is deployed.`);
+    }
+    return r.json();
+  })
+  .then(json => {
+    if (!json || !Array.isArray(json.analyzed_reviews) || !json.dimension_summaries) {
+      throw new Error('Dashboard data validation failed: missing analyzed_reviews or dimension_summaries. Action: regenerate analysis_results.json.');
+    }
+    rawData = json;
     originalDimensionSummaries = json.dimension_summaries;
-    initFromData(json); 
+    initFromData(json);
     initializeFilters();
-  });
+  })
+  .catch(error => {
+    console.error('[tomo-id-064] Dashboard initialization failed', {
+      operation: 'load_analysis_results',
+      errorType: error && error.name,
+      errorMessage: error && error.message,
+      action: 'Confirm analysis_results.json exists and is valid JSON'
+    });
+    alert('Unable to load dashboard data. Reference: tomo-id-064');
+  })
+  .finally(() => clearTimeout(analysisResultsTimeoutId));
 
 function initFromData(data) {
   rawData = data;
@@ -294,7 +345,18 @@ async function applyDateFilter(startDate, endDate) {
       console.log('Using cached dimension summaries');
       tempDimensionSummaries = cached;
     } else {
-      console.log('Calling API to generate summaries...');
+      // Tomosu AI Recommendation: Bounded summary payload size and injected request IDs to prevent overload and improve downstream tracing.
+      const maxSummaryReviews = 500;
+      const correlationId = (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : `summary-${Date.now()}`;
+      if (filtered.length > maxSummaryReviews) {
+        throw new Error(`Summary request rejected: ${filtered.length} reviews exceeds the safe limit of ${maxSummaryReviews}. Action: narrow the date range and retry. Reference: ${correlationId}`);
+      }
+
+      console.info('[tomo-id-065] Calling summary API', {
+        operation: 'generate_dimension_summaries',
+        reviewCount: filtered.length,
+        correlationId
+      });
       const controller = new AbortController();
       const timeoutMs = 90000; // 90 seconds
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -304,7 +366,9 @@ async function applyDateFilter(startDate, endDate) {
         response = await fetch('https://psmmc-back.vercel.app/api/generate_summaries', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'x-request-id': correlationId,
+            'traceparent': `00-${correlationId.replace(/-/g, '').padEnd(32, '0').slice(0, 32)}-0000000000000001-01`
           },
           body: JSON.stringify({
             reviews: filtered
@@ -571,15 +635,17 @@ function refreshInsights() {
           <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px;">
       `;
 
+      // Tomosu AI Recommendation: Escaped review image URLs before HTML interpolation to prevent dashboard XSS from imported review data.
       images.forEach((imageUrl, index) => {
+        const safeImageUrl = escapeHtml(imageUrl);
         reviewContent += `
           <div style="position: relative; cursor: pointer;">
-            <img src="${imageUrl}" 
+            <img src="${safeImageUrl}" 
                  style="width: 80px; height: 80px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0; transition: transform 0.2s;" 
                  alt="Review image ${index + 1}"
                  onmouseover="this.style.transform='scale(1.05)'"
                  onmouseout="this.style.transform='scale(1)'"
-                 onclick="showImageModal('${imageUrl}')"
+                 onclick="showImageModal('${safeImageUrl}')"
                  onerror="this.parentElement.innerHTML='<div style=\\'width: 80px; height: 80px; background: #f3f4f6; border: 1px solid #e2e8f0; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #9ca3af;\\'>Image unavailable</div>'">
           </div>
         `;

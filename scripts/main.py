@@ -1,12 +1,34 @@
+# Tomosu AI Recommendation: Added JSON logging foundation so batch-analysis failures are searchable and support-friendly.
 import json
 import openai
 import time
 import argparse
-from datetime import datetime
+import logging
+import random
+from datetime import datetime, timezone
 from typing import List, Dict, Any
 import os
 from pathlib import Path
 import re
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        payload = {
+            "level": record.levelname,
+            "message": record.getMessage(),
+            "logger": record.name,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonFormatter())
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 
 def chunk_list(lst, chunk_size):
@@ -16,9 +38,10 @@ def chunk_list(lst, chunk_size):
 
 
 class ReviewSentimentAnalyzer:
+    # Tomosu AI Recommendation: Set explicit OpenAI timeout and retry ownership to prevent indefinite external dependency waits.
     def __init__(self, openai_api_key: str):
         """Initialize the analyzer with OpenAI API key"""
-        self.client = openai.OpenAI(api_key=openai_api_key)
+        self.client = openai.OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=0)
         
         # Define sentiment analysis dimensions
         self.analysis_dimensions = [
@@ -80,8 +103,11 @@ class ReviewSentimentAnalyzer:
     def analyze_single_review(self, review: Dict[str, Any], retry_count: int = 2) -> Dict[str, Any]:
         """Analyze sentiment for a single review with retry logic"""
         
+        # Tomosu AI Recommendation: Redacted and bounded healthcare review text before sending it to the LLM provider.
         review_text = review.get('text', '')
         rating = review.get('rating', 0)
+        prompt_review_text = re.sub(r'[\w\.-]+@[\w\.-]+', '[REDACTED_EMAIL]', review_text)
+        prompt_review_text = re.sub(r'\+?\d[\d\s\-()]{7,}\d', '[REDACTED_PHONE]', prompt_review_text)[:4000]
         
         # Check if the text appears to be in Arabic
         has_arabic = bool(re.search(r'[\u0600-\u06FF]', review_text))
@@ -90,7 +116,7 @@ class ReviewSentimentAnalyzer:
 Analyze this review using both the review text and rating to provide comprehensive sentiment analysis:
 
 **Input:**
-- Review Text: "{review_text}"
+- Review Text: "{prompt_review_text}"
 - Rating: {rating}/5
 - Language: {"Arabic" if has_arabic else "English/Other"}
 
@@ -147,10 +173,18 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
 
         for attempt in range(retry_count + 1):
             try:
+                # Tomosu AI Recommendation: Added jittered exponential backoff and structured retry logging to avoid synchronized retry storms.
                 # Add exponential backoff for retries
                 if attempt > 0:
-                    wait_time = (2 ** attempt) + 1
-                    print(f"  Retrying in {wait_time} seconds... (attempt {attempt + 1})")
+                    wait_time = min((2 ** attempt) + random.uniform(0.1, 1.0), 10.0)
+                    logger.warning(json.dumps({
+                        "message": "[tomo-id-067] Retrying OpenAI review analysis after transient failure",
+                        "operation": "analyze_single_review",
+                        "attempt": attempt + 1,
+                        "max_attempts": retry_count + 1,
+                        "wait_seconds": round(wait_time, 3),
+                        "action": "monitor OpenAI status if retries continue"
+                    }, ensure_ascii=False))
                     time.sleep(wait_time)
                 
                 response = self.client.chat.completions.create(
@@ -236,6 +270,14 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
         
         review_id = self._extract_review_id(review)
         
+        # Tomosu AI Recommendation: Sanitized fallback output and added explicit fallback markers to avoid leaking provider errors into reports.
+        logger.error(json.dumps({
+            "message": "[tomo-id-068] Falling back to rating-only sentiment analysis",
+            "operation": "create_fallback_analysis",
+            "review_id": review_id,
+            "error_type": type(error_msg).__name__,
+            "action": "review OpenAI availability and inspect protected job logs"
+        }, ensure_ascii=False))
         return {
             "review_id": review_id,
             "author": review.get('name', ''),
@@ -250,10 +292,11 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                 "dimensions": [],
                 "key_themes": [],
                 "severity": 0,
-                "summary": f"Fallback analysis based on rating only. Error: {error_msg}"
+                "summary": "Fallback analysis based on rating only. Reference: ERR_AI_ANALYSIS_FALLBACK"
             },
-            "processed_at": datetime.now().isoformat(),
-            "error": error_msg
+            "processed_at": datetime.now(timezone.utc).isoformat(),
+            "error_code": "ERR_AI_ANALYSIS_FALLBACK",
+            "fallback_used": True
         }
     
     def generate_sentiment_summaries(self, analyzed_reviews: List[Dict[str, Any]]) -> Dict[str, Any]:
