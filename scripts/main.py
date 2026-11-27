@@ -1,12 +1,20 @@
+# Tomosu AI Recommendation: Added structured JSON logging primitives and UTC support for production-grade incident triage.
 import json
 import openai
 import time
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any
 import os
 from pathlib import Path
 import re
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='{"timestamp":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","message":"%(message)s"}'
+)
+logger = logging.getLogger(__name__)
 
 
 def chunk_list(lst, chunk_size):
@@ -16,9 +24,11 @@ def chunk_list(lst, chunk_size):
 
 
 class ReviewSentimentAnalyzer:
+    # Tomosu AI Recommendation: Added explicit OpenAI timeout and configurable model to prevent stalled vendor calls from blocking batch jobs.
     def __init__(self, openai_api_key: str):
         """Initialize the analyzer with OpenAI API key"""
-        self.client = openai.OpenAI(api_key=openai_api_key)
+        self.client = openai.OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=0)
+        self.model = os.getenv('OPENAI_MODEL', 'gpt-4')
         
         # Define sentiment analysis dimensions
         self.analysis_dimensions = [
@@ -147,14 +157,22 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
 
         for attempt in range(retry_count + 1):
             try:
+                # Tomosu AI Recommendation: Added capped jittered backoff to prevent synchronized retry storms against OpenAI.
                 # Add exponential backoff for retries
                 if attempt > 0:
-                    wait_time = (2 ** attempt) + 1
-                    print(f"  Retrying in {wait_time} seconds... (attempt {attempt + 1})")
+                    import random
+                    wait_time = min(30.0, (2 ** attempt) + random.uniform(0.1, 1.0))
+                    logger.warning('[tomo-id-067] Retrying OpenAI review analysis after transient failure', extra={
+                        'operation': 'analyze_single_review',
+                        'attempt': attempt + 1,
+                        'wait_seconds': round(wait_time, 3),
+                        'action': 'Waiting before retry with jittered exponential backoff.'
+                    })
                     time.sleep(wait_time)
                 
+                # Tomosu AI Recommendation: Switched to configurable OpenAI model so incidents can be mitigated without redeploying code.
                 response = self.client.chat.completions.create(
-                    model="gpt-4",
+                    model=self.model,
                     messages=[
                         {
                             "role": "system", 
@@ -188,6 +206,7 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                 review_id = self._extract_review_id(review)
                 
                 # Add original review data to the result in the expected format
+                # Tomosu AI Recommendation: Changed processed timestamps to UTC-aware ISO strings for consistent cross-region analytics.
                 result = {
                     "review_id": review_id,
                     "author": review.get('name', ''),
@@ -196,7 +215,7 @@ RESPOND WITH ONLY VALID JSON IN THIS EXACT FORMAT:
                     "date": review.get('date', ''),
                     "images": review.get('images', []),  # Include images if available
                     "analysis": analysis_result,
-                    "processed_at": datetime.now().isoformat()
+                    "processed_at": datetime.now(timezone.utc).isoformat()
                 }
                 
                 return result
@@ -625,24 +644,35 @@ def load_reviews_from_file(file_path: str) -> List[Dict[str, Any]]:
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
+        # Tomosu AI Recommendation: Added strict review payload validation at file ingestion to fail fast on malformed external data.
         # Handle the new JSON structure
         if isinstance(data, dict) and 'reviews' in data:
             # New format: {"metadata": {...}, "reviews": [...]}
             reviews = data['reviews']
-            print(f"Loaded {len(reviews)} reviews from new format")
-            return reviews
+            logger.info('[tomo-id-068] Loaded reviews from structured input file', extra={
+                'operation': 'load_reviews_from_file',
+                'review_count': len(reviews) if isinstance(reviews, list) else 0
+            })
         elif isinstance(data, list):
             # Old format: direct list of reviews
-            return data
+            reviews = data
         elif isinstance(data, dict):
             # If it's a dict, look for other common keys that might contain reviews
+            reviews = None
             for key in ['data', 'items']:
                 if key in data and isinstance(data[key], list):
-                    return data[key]
+                    reviews = data[key]
+                    break
             # If no common key found, treat the dict as a single review
-            return [data]
+            if reviews is None:
+                reviews = [data]
         else:
-            raise ValueError("Invalid JSON structure")
+            raise ValueError(f"Invalid JSON structure in {file_path}. Action: provide a list of review objects or a dict containing reviews/data/items.")
+
+        if not isinstance(reviews, list) or any(not isinstance(review, dict) for review in reviews):
+            raise ValueError(f"Invalid review payload in {file_path}. Action: ensure every review is a JSON object.")
+
+        return reviews
             
     except FileNotFoundError:
         raise FileNotFoundError(f"File not found: {file_path}")

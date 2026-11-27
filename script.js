@@ -18,6 +18,7 @@ function setCacheWithExpiry(key, value) {
   localStorage.setItem(key, JSON.stringify(item));
 }
 
+// Tomosu AI Recommendation: Added bounded cache-corruption logging so filter cache failures are visible without exposing review payloads.
 function getCacheWithExpiry(key) {
   const itemStr = localStorage.getItem(key);
   
@@ -36,6 +37,12 @@ function getCacheWithExpiry(key) {
     
     return item.value;
   } catch (e) {
+    console.warn('[tomo-id-065] Filter cache entry could not be parsed and was removed', {
+      operation: 'get_filter_cache',
+      cacheKey: key,
+      errorName: e.name,
+      action: 'Cache entry removed; regenerate summaries if needed.'
+    });
     localStorage.removeItem(key);
     return null;
   }
@@ -55,14 +62,32 @@ function clearExpiredCache() {
 clearExpiredCache();
 
 // Load data
-fetch('./analysis_results.json')
-  .then(r => r.json())
+// Tomosu AI Recommendation: Added timeout and contextual error handling so dashboard initialization fails fast instead of hanging silently.
+const initialDataController = new AbortController();
+const initialDataTimeoutId = setTimeout(() => initialDataController.abort(), 10000);
+
+fetch('./analysis_results.json', { signal: initialDataController.signal })
+  .then(r => {
+    if (!r.ok) {
+      throw new Error(`Dashboard data load failed with HTTP ${r.status}. Action: verify analysis_results.json is deployed and reachable.`);
+    }
+    return r.json();
+  })
   .then(json => { 
     rawData = json; 
     originalDimensionSummaries = json.dimension_summaries;
     initFromData(json); 
     initializeFilters();
-  });
+  })
+  .catch(error => {
+    console.error('[tomo-id-064] Dashboard initialization failed', {
+      operation: 'load_analysis_results',
+      errorName: error.name,
+      errorMessage: error.message,
+      action: 'Verify analysis_results.json exists and the static host is healthy.'
+    });
+  })
+  .finally(() => clearTimeout(initialDataTimeoutId));
 
 function initFromData(data) {
   rawData = data;
@@ -276,8 +301,17 @@ async function applyDateFilter(startDate, endDate) {
     
     console.log(`Filtered ${filtered.length} reviews from ${rawData.analyzed_reviews.length} total`);
     
+    // Tomosu AI Recommendation: Added filter result cap to prevent oversized summary-generation requests from overloading the backend.
+    const maxReviewsPerSummaryRequest = 500;
     if (filtered.length === 0) {
       alert('No reviews found in selected date range');
+      loading.style.display = 'none';
+      applyBtn.disabled = false;
+      return;
+    }
+
+    if (filtered.length > maxReviewsPerSummaryRequest) {
+      alert(`Selected range contains ${filtered.length} reviews. Please narrow the date range to ${maxReviewsPerSummaryRequest} reviews or fewer.`);
       loading.style.display = 'none';
       applyBtn.disabled = false;
       return;
@@ -295,16 +329,20 @@ async function applyDateFilter(startDate, endDate) {
       tempDimensionSummaries = cached;
     } else {
       console.log('Calling API to generate summaries...');
+      // Tomosu AI Recommendation: Added correlation propagation and named timeout constants for backend summary calls.
       const controller = new AbortController();
+      const summariesApiUrl = 'https://psmmc-back.vercel.app/api/generate_summaries';
       const timeoutMs = 90000; // 90 seconds
+      const correlationId = (crypto && crypto.randomUUID) ? crypto.randomUUID() : `filter-${Date.now()}`;
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       let response;
       try {
-        response = await fetch('https://psmmc-back.vercel.app/api/generate_summaries', {
+        response = await fetch(summariesApiUrl, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'x-request-id': correlationId
           },
           body: JSON.stringify({
             reviews: filtered
@@ -314,7 +352,7 @@ async function applyDateFilter(startDate, endDate) {
       } catch (err) {
         clearTimeout(timeoutId);
         if (err && err.name === 'AbortError') {
-          throw new Error('Request timed out after 90 seconds');
+          throw new Error(`Summary generation timed out after ${timeoutMs}ms. Action: verify backend/API health. correlation_id=${correlationId}`);
         }
         throw err;
       }
@@ -688,6 +726,7 @@ function capitalize(s) {
   if (!s) return s;
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
+// Tomosu AI Recommendation: Enforced UTC date formatting to prevent timezone-based review date shifts across regions.
 function formatDate(dateString) {
   if (!dateString) return '';
   
@@ -697,21 +736,16 @@ function formatDate(dateString) {
     // Check if valid date
     if (isNaN(date.getTime())) return dateString;
     
-    // Format: "September 4, 2025"
-    const options = { year: 'numeric', month: 'long', day: 'numeric' };
+    // Format: "September 4, 2025" in UTC for consistent dashboards across regions
+    const options = { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' };
     return date.toLocaleDateString('en-US', options);
     
-    // Alternative shorter format: "Sep 4, 2025"
-    // const options = { year: 'numeric', month: 'short', day: 'numeric' };
-    // return date.toLocaleDateString('en-US', options);
-    
-    // Alternative format: "04/09/2025" (DD/MM/YYYY)
-    // const day = String(date.getDate()).padStart(2, '0');
-    // const month = String(date.getMonth() + 1).padStart(2, '0');
-    // const year = date.getFullYear();
-    // return `${day}/${month}/${year}`;
-    
   } catch (error) {
+    console.warn('[tomo-id-066] Review date formatting failed', {
+      operation: 'format_review_date',
+      errorName: error.name,
+      action: 'Returning original date string for display.'
+    });
     return dateString;
   }
 }
